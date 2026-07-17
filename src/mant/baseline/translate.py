@@ -124,8 +124,10 @@ class BaselineTranslator:
             - ``segments``: 切分后的原文段列表；
             - ``translations``: 与 segments 等长的译文列表；
             - ``injection_stats``: 注入统计（见下方代码内注释）；
-            - ``prompt_preview``: 首个 segment 的完整用户 prompt（截断），
-              供实验复盘 RAG 注入内容。
+            - ``prompt_preview``: 单个 segment 的完整用户 prompt（截断），
+              供实验复盘 RAG 注入内容。默认取首个 segment；若首段没有任何
+              术语 / TM 注入，则改取第一个有注入的 segment，避免预览中
+              术语表 / 翻译记忆块恒为占位行而看不到实际注入的约定译法。
         """
         chapter_path = Path(chapter_path)
         text = chapter_path.read_text(encoding="utf-8")
@@ -144,12 +146,18 @@ class BaselineTranslator:
 
         translations: list[str] = []
         prompt_preview = ""
+        preview_has_injection = False
         for index, segment in enumerate(segments):
             term_hits = self._lookup_terms_safe(memory, work_id, segment, stats)
             tm_matches = self._search_tm_safe(memory, work_id, segment, stats)
             user_prompt = self.build_prompt(segment, term_hits, tm_matches)
-            if index == 0:
+            # prompt_preview 用于复盘 RAG 注入内容：默认取首段；若已取的预览
+            # 不含任何注入，则改取第一个有术语 / TM 注入的段（只替换一次）。
+            if index == 0 or (
+                not preview_has_injection and (term_hits or tm_matches)
+            ):
                 prompt_preview = user_prompt[: self.max_prompt_preview]
+                preview_has_injection = bool(term_hits or tm_matches)
             try:
                 translation = llm.complete(
                     self.system_prompt,
