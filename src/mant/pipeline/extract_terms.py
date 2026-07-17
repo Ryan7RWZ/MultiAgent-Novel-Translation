@@ -6,7 +6,11 @@
     2. ``llm_review_candidates``：LLM 复核 stub —— 通过统一接口
        ``mant.llm.client.LLMClient`` 让模型翻译/甄别候选词；
     3. ``build_term_entries`` + 入库：结果写入 ``mant.memory.glossary.GlossaryStore``
-       （``upsert(entries)``；也兼容 MemoryHub 的 ``record_terms(entries)``）。
+       （``upsert(entries)``；也兼容 MemoryHub 的 ``record_terms(entries)``）；
+    4. ``offline_fallback_entries``：**无 LLM 环境的降级行为** —— 未注入
+       ``LLMClient``，或 LLM 返回 [DRAFT] 占位 / 输出解析失败导致复核后零入库时，
+       把 TF-IDF 排名前 N 的候选词以 ``confidence=0.5``、``category="offline"``
+       直接入库，避免术语库空转（条目留待后续 LLM/人工复核补译）。
 
 第三方依赖规则：本模块仅使用标准库；``mant.memory.models`` 为项目统一数据契约
 （stdlib dataclass），``LLMClient`` 由调用方注入，本模块不做 LLM 客户端的构造。
@@ -32,6 +36,7 @@ __all__ = [
     "char_ngrams",
     "extract_terms_for_work",
     "llm_review_candidates",
+    "offline_fallback_entries",
     "save_terms",
     "tfidf_candidates",
     "word_ngrams_en",
@@ -211,7 +216,9 @@ def tfidf_candidates(
         idf = math.log((1 + n_docs) / (1 + df[gram])) + 1.0
         scored.append(TermCandidate(term=gram, score=round(freq * idf, 4), freq=freq, lang=lang))
 
-    scored.sort(key=lambda c: (-c.score, c.term))
+    # 同分时优先长词：短前缀碎片（如 "澜大"）若先入选，下方子串去重会因
+    # "父词不是碎片子串"（方向相反）而失效；长词优先可保证碎片被父词去重
+    scored.sort(key=lambda c: (-c.score, -len(c.term), c.term))
 
     # 子串去重：若候选词是已入选高分词的子串且词频不超过之，判为碎片丢弃
     selected: list[TermCandidate] = []
@@ -407,6 +414,45 @@ def save_terms(entries: list[TermEntry], store: Any) -> int:
     raise TypeError("store 需实现 upsert(entries) 或 record_terms(entries)（见 mant.memory）")
 
 
+# ---------------------------------------------------------------------------
+# 离线降级入库（无 LLM 环境的降级行为）
+# ---------------------------------------------------------------------------
+
+# 离线降级条目的 category 标记：标注该条目来自离线降级路径（区别于 LLM 复核/人工确认）
+CATEGORY_OFFLINE = "offline"
+
+
+def offline_fallback_entries(
+    candidates: list[TermCandidate],
+    work_id: str,
+    *,
+    top_n: int = 50,
+    confidence: float = 0.5,
+) -> list[TermEntry]:
+    """离线降级入库：把 TF-IDF 排名前 ``top_n`` 的候选词直接转为术语条目。
+
+    **这是无 LLM 环境的降级行为**：未注入 ``LLMClient``，或 LLM 返回 [DRAFT]
+    占位响应 / 输出解析失败，导致复核后没有任何可入库条目时，为避免术语库
+    空转，把排名靠前的候选词以低置信度直接入库，留待后续 LLM/人工复核补译。
+
+    条目约定：
+        - ``category`` 固定为 ``"offline"``，显式标注来源为离线降级路径；
+        - ``confidence`` 默认 0.5（低于 LLM 复核条目，高于未复核的 0.0）；
+        - ``target`` 留空（离线路径无译法，待复核补全；terms 表 target 列
+          为 NOT NULL，空串不违反约束，且术语查询侧应按空译法=未确认处理）。
+    """
+    return [
+        TermEntry(
+            source=cand.term,
+            target="",
+            category=CATEGORY_OFFLINE,
+            work_id=work_id,
+            confidence=confidence,
+        )
+        for cand in candidates[: max(top_n, 0)]
+    ]
+
+
 def extract_terms_for_work(
     docs: list[str],
     work_id: str,
@@ -416,8 +462,10 @@ def extract_terms_for_work(
     lang: str = "zh",
     top_k: int = 200,
     min_freq: int = 3,
+    offline_fallback: bool = True,
+    offline_top_n: int = 50,
 ) -> dict[str, int | str]:
-    """单作品术语抽取编排：TF-IDF 抽取 → LLM 复核 → 入库。
+    """单作品术语抽取编排：TF-IDF 抽取 → LLM 复核 → （离线降级）→ 入库。
 
     参数:
         docs: 该作品的文档列表（建议按章节切分后传入）。
@@ -425,13 +473,24 @@ def extract_terms_for_work(
         llm: 可选 ``LLMClient``；None 时跳过复核（词条按未复核透传）。
         store: 可选术语库（GlossaryStore/MemoryHub）；None 时跳过入库。
         lang / top_k / min_freq: 透传给 ``tfidf_candidates``。
+        offline_fallback: 无 LLM 环境的降级开关（默认开启）：复核后零可入库
+            条目时（未注入 llm，或 LLM 占位/解析失败），把 TF-IDF 排名前
+            ``offline_top_n`` 的候选词以 confidence=0.5、category="offline"
+            直接入库，见 ``offline_fallback_entries``。
+        offline_top_n: 离线降级入库的候选词上限。
 
     返回:
-        统计字典：{work_id, docs, candidates, reviewed, entries, saved}。
+        统计字典：{work_id, docs, candidates, reviewed, entries, saved,
+        offline_fallback}（offline_fallback=1 表示本次走了离线降级路径）。
     """
     candidates = tfidf_candidates(docs, lang=lang, top_k=top_k, min_freq=min_freq)
     reviewed = llm_review_candidates(candidates, llm, work_id=work_id)
     entries = build_term_entries(reviewed, work_id)
+    used_fallback = 0
+    if not entries and candidates and offline_fallback:
+        # 离线降级：LLM 缺失/占位/解析失败导致零入库，改存 TF-IDF 头部候选
+        entries = offline_fallback_entries(candidates, work_id, top_n=offline_top_n)
+        used_fallback = 1
     saved = save_terms(entries, store) if store is not None else 0
     return {
         "work_id": work_id,
@@ -440,4 +499,5 @@ def extract_terms_for_work(
         "reviewed": len(reviewed),
         "entries": len(entries),
         "saved": saved,
+        "offline_fallback": used_fallback,
     }
