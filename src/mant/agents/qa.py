@@ -1,0 +1,276 @@
+"""QA 终审 Agent（QAAgent）：四维评分与放行 / 返工裁决。
+
+骨架级别实现：按 accuracy / fluency / terminology / style 四维 0-10 评分，
+``qa_score`` 由代码按权重确定性计算（不直接信任模型自报的均分），
+``qa_verdict`` 经阈值校验后给出，解析失败时安全默认为 rework。
+"""
+
+from __future__ import annotations
+
+from typing import Any
+
+from mant.agents.base import AgentResult, AgentTask, BaseAgent
+
+__all__ = ["QAAgent"]
+
+
+# ----------------------------------------------------------------------
+# 输出规整 / 上下文渲染辅助
+# ----------------------------------------------------------------------
+def _clamp_score(value: Any) -> float | None:
+    """把维度得分规整为 0-10 的 float；无法解析返回 None。"""
+    try:
+        score = float(value)
+    except (TypeError, ValueError):
+        return None
+    return max(0.0, min(10.0, score))
+
+
+def _extract_qa_detail(parsed: Any) -> dict[str, Any] | None:
+    """从 JSON 解析结果中提取并校验 QA 明细；结构不符返回 None。
+
+    标准结构：四维得分 + verdict + suggestions；缺任一维度得分即视为无效。
+    """
+    if not isinstance(parsed, dict):
+        return None
+    detail: dict[str, Any] = {}
+    for dim in ("accuracy", "fluency", "terminology", "style"):
+        score = _clamp_score(parsed.get(dim))
+        if score is None:
+            return None
+        detail[dim] = score
+    verdict = str(parsed.get("verdict", "")).strip().lower()
+    detail["verdict"] = verdict if verdict in ("pass", "rework") else ""
+    suggestions = parsed.get("suggestions", [])
+    if isinstance(suggestions, list):
+        detail["suggestions"] = [str(s) for s in suggestions]
+    elif suggestions:
+        detail["suggestions"] = [str(suggestions)]
+    else:
+        detail["suggestions"] = []
+    return detail
+
+
+def _render_glossary(glossary: Any) -> str:
+    """把 context 中的术语材料渲染为 Prompt 文本（缺省返回占位说明）。
+
+    TODO: 与 translator.py / editor.py 中的同名辅助重复，待基础设施组
+    抽到公共模块（如 mant.agents.prompts）后统一替换。
+    """
+    empty_hint = "（未提供术语表）"
+    if not glossary:
+        return empty_hint
+    lines: list[str] = []
+    if isinstance(glossary, dict):
+        for source, value in glossary.items():
+            target = value if isinstance(value, str) else (
+                getattr(value, "target", None)
+                or (value.get("target", "") if isinstance(value, dict) else "")
+            )
+            if source and target:
+                lines.append(f"- {source} → {target}")
+    else:
+        for entry in glossary:
+            source = getattr(entry, "source", None) or (
+                entry.get("source", "") if isinstance(entry, dict) else ""
+            )
+            target = getattr(entry, "target", None) or (
+                entry.get("target", "") if isinstance(entry, dict) else ""
+            )
+            if source and target:
+                lines.append(f"- {source} → {target}")
+    return "\n".join(lines) or empty_hint
+
+
+def _render_review_notes(review_notes: Any) -> str:
+    """把审校意见列表渲染为 Prompt 文本；空列表返回空串。"""
+    if not review_notes:
+        return ""
+    lines: list[str] = []
+    for note in review_notes:
+        if isinstance(note, dict):
+            severity = note.get("severity", "?")
+            issue_type = note.get("issue_type", "?")
+            suggestion = note.get("suggestion", "")
+            span = note.get("span", "")
+            lines.append(f"- [{severity}/{issue_type}] {suggestion}（片段：{span}）")
+        else:
+            lines.append(f"- {note}")
+    return "\n".join(lines)
+
+
+# ----------------------------------------------------------------------
+# QA 终审 Agent
+# ----------------------------------------------------------------------
+class QAAgent(BaseAgent):
+    """QA 终审 Agent：四维评分 + pass / rework 裁决。
+
+    - 模型档位：``strong``（终审结论直接驱动 LangGraph 的回退回环）。
+    - 输入：``task.source_text`` 原文；``task.context["polished"]``（优先）
+      或 ``task.context["draft"]`` 待终审译文；``glossary`` /
+      ``review_notes`` 可选。
+    - 输出：``AgentResult.output = {"qa_score": float, "qa_verdict": str,
+      "qa_detail": dict}``；``qa_detail`` 含四维得分、verdict、suggestions。
+    - 裁决确定性：``qa_score`` 由代码按权重计算；``qa_verdict`` 经阈值
+      校验，模型自报 verdict 仅作参考（不一致时记入 notes）。
+    """
+
+    name: str = "qa"
+    #: 期望模型档位，供调度 / 工厂用 ``LLMClient.with_tier`` 挑选客户端
+    tier: str = "strong"
+    #: 采样温度：评分要求低发散、可复现
+    temperature: float = 0.1
+    #: 单次补全最大 token 数（JSON 输出较短）
+    max_tokens: int = 2048
+
+    #: 四维权重（和为 1.0）：忠实度权重最高
+    DIMENSION_WEIGHTS: dict[str, float] = {
+        "accuracy": 0.4,
+        "fluency": 0.2,
+        "terminology": 0.2,
+        "style": 0.2,
+    }
+    #: 放行阈值：加权总分 >= PASS_SCORE_THRESHOLD 且各维度 >= MIN_DIMENSION_SCORE
+    # TODO: 阈值改由配置注入（如 workflow.qa_pass_threshold），便于实验调参
+    PASS_SCORE_THRESHOLD: float = 7.0
+    MIN_DIMENSION_SCORE: float = 6.0
+
+    # 系统提示词：定义终审角色、评分维度、裁决规则与 JSON 输出 schema。
+    # 不含槽位（直接作为 system 传入），因此可以安全包含 JSON 花括号示例。
+    SYSTEM_PROMPT: str = """你是一名资深翻译质量终审专家，为网络小说译文的发布质量把关。
+
+【评分维度】（每项 0-10，可给一位小数）
+- accuracy 忠实度：是否漏译 / 误译，剧情事实与设定是否正确。
+- fluency 流畅度：英文是否地道自然，语法、搭配是否正确。
+- terminology 术语一致性：专名与术语是否全书统一、与术语表一致。
+- style 文风：是否符合网文节奏与本书文风，阅读体验是否流畅。
+
+【裁决规则】
+- verdict 只能是 "pass" 或 "rework"。
+- 总分 = accuracy×0.4 + fluency×0.2 + terminology×0.2 + style×0.2；
+  总分 >= 7.0 且四个维度均 >= 6.0 方可判 "pass"，否则判 "rework"。
+- 判 "rework" 时必须给出具体、可执行的返工建议（指出问题位置与修改方向）。
+
+【输出要求】
+只输出 JSON，不要输出任何其他文字、解释或代码块标记。格式如下：
+{
+  "accuracy": 8.0,
+  "fluency": 8.5,
+  "terminology": 9.0,
+  "style": 8.0,
+  "verdict": "pass",
+  "suggestions": ["返工建议（中文，逐条具体可执行）；判 pass 时可为空数组"]
+}"""
+
+    #: 用户提示词模板：{source_text} 原文 / {polished} 待终审译文 /
+    #: {glossary} 术语表 / {review_notes} 审校意见
+    USER_PROMPT_TEMPLATE: str = """【原文】
+{source_text}
+
+【待终审译文】
+{polished}
+
+【术语表】
+{glossary}
+
+【审校意见（如有）】
+{review_notes}
+
+请按四个维度评分，并按要求只输出 JSON。"""
+
+    def run(self, task: AgentTask) -> AgentResult:
+        """执行终审：渲染 Prompt → 调用 LLM → 解析 JSON → 代码侧裁决。
+
+        约定：
+            - 不抛出未捕获异常；失败 / 解析异常时安全默认判 rework，
+              原因写入 ``notes``（由 LangGraph 回退节点消费）；
+            - 未配置真实模型时占位响应无法解析为 JSON，同样走安全降级。
+        """
+        notes: list[str] = []
+
+        # 1) 读取输入：优先终审润色稿，缺润色稿时退回初稿（兼容未接润色节点的联调）
+        polished = str(
+            task.context.get("polished") or task.context.get("draft") or ""
+        ).strip()
+        if not polished:
+            notes.append("task.context 缺少 polished/draft（待终审译文），QA 跳过并默认 rework")
+            return self._result(
+                ok=False,
+                output={"qa_score": 0.0, "qa_verdict": "rework", "qa_detail": {}},
+                notes=notes,
+            )
+        glossary_text = _render_glossary(task.context.get("glossary"))
+        review_notes_text = _render_review_notes(task.context.get("review_notes")) or "（无）"
+
+        # 2) 渲染用户提示词（SYSTEM_PROMPT 无槽位，直接作为系统提示词）
+        user = self.build_user_prompt(
+            self.USER_PROMPT_TEMPLATE,
+            source_text=task.source_text,
+            polished=polished,
+            glossary=glossary_text,
+            review_notes=review_notes_text,
+        )
+
+        # 3) 调用 LLM
+        try:
+            raw = self.llm.complete(
+                self.SYSTEM_PROMPT,
+                user,
+                temperature=self.temperature,
+                max_tokens=self.max_tokens,
+            )
+        except Exception as exc:  # noqa: BLE001 —— 骨架期统一降级，不向上抛
+            notes.append(f"LLM 调用失败：{exc!r}")
+            return self._result(
+                ok=False,
+                output={"qa_score": 0.0, "qa_verdict": "rework", "qa_detail": {}},
+                notes=notes,
+            )
+        # 合并客户端侧说明（降级原因 / 重试记录等）
+        notes.extend(self.llm.last_notes)
+
+        # 4) 解析 JSON 输出；parse_json_output 失败时返回 None 并自动记录 notes
+        parsed = self.parse_json_output(raw, notes)
+        detail = _extract_qa_detail(parsed)
+        if detail is None:
+            notes.append("QA 评分结构不符合 schema，安全默认判 rework")
+            return self._result(
+                ok=False,
+                output={"qa_score": 0.0, "qa_verdict": "rework", "qa_detail": {}},
+                notes=notes,
+            )
+
+        # 5) 代码侧确定性计算总分（不直接信任模型自报的均分）
+        qa_score = round(
+            sum(detail[dim] * weight for dim, weight in self.DIMENSION_WEIGHTS.items()),
+            2,
+        )
+
+        # 6) 阈值校验裁决；模型自报 verdict 仅作参考
+        verdict = (
+            "pass"
+            if qa_score >= self.PASS_SCORE_THRESHOLD
+            and min(detail[dim] for dim in self.DIMENSION_WEIGHTS)
+            >= self.MIN_DIMENSION_SCORE
+            else "rework"
+        )
+        llm_verdict = detail.get("verdict", "")
+        if llm_verdict and llm_verdict != verdict:
+            notes.append(
+                f"模型 verdict={llm_verdict!r} 与阈值裁决 {verdict!r} 不一致，采用阈值裁决"
+            )
+        detail["verdict"] = verdict
+        if verdict == "rework" and not detail.get("suggestions"):
+            detail["suggestions"] = ["（模型未给出具体返工建议，请人工复核）"]
+            notes.append("判 rework 但模型未提供返工建议，已填占位建议")
+
+        # TODO: qa_score / qa_detail 写入实验日志，供 M2 单 Agent 基线对照分析
+        return self._result(
+            ok=True,
+            output={
+                "qa_score": qa_score,
+                "qa_verdict": verdict,
+                "qa_detail": detail,
+            },
+            notes=notes,
+        )

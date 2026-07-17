@@ -1,0 +1,36 @@
+# ============================================================================
+# MANT · 基于大数据与多智能体协作的网络小说自主翻译系统
+# src 布局，包名 mant，Python >= 3.11
+# ============================================================================
+
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "mant"
+version = "0.1.0"
+description = "基于大数据与多智能体协作的网络小说自主翻译系统（Multi-Agent Novel Translation）"
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+    "langgraph>=0.2",       # LangGraph 状态机（QA 回退返工回环）
+    "openai>=1.0",          # LLMClient 统一调用大模型（fast/strong 双档）
+    "pyyaml>=6.0",          # 读取 config/settings.yaml
+    "numpy>=1.26",          # 向量与数值计算
+    "python-dotenv>=1.0",   # 从 .env 加载 API key 等环境变量
+]
+
+[project.optional-dependencies]
+# 可选：FAISS 向量检索（RAG）。安装：pip install -e ".[faiss]"
+faiss = ["faiss-cpu>=1.7.4"]
+# 可选：开发 / 测试工具。安装：pip install -e ".[dev]"
+dev = ["pytest>=8.0"]
+# 备注：M1 句对齐可选 vecalign / LASER，通常需从源码安装，不写入依赖，
+# 以免破坏默认安装；需要时参考 README「快速开始」手动安装。
+
+[project.scripts]
+mant = "mant.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
