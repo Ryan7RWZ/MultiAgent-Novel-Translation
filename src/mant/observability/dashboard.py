@@ -25,29 +25,109 @@ DASHBOARD_HTML = r"""<!doctype html>
 <html lang="zh-CN">
 <head>
 <meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
-<title>MANT Agent Monitor</title>
+<title>MANT 翻译工作台</title>
 <style>
-:root{color-scheme:dark;--bg:#0b1020;--panel:#121a2d;--line:#26324d;--muted:#91a0ba;--text:#edf2ff;--blue:#61a8ff;--green:#55d6a5;--yellow:#ffd166;--red:#ff6b7a}
-*{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--text);font:14px/1.5 ui-monospace,SFMono-Regular,Consolas,monospace}header{position:sticky;top:0;z-index:2;display:flex;gap:16px;align-items:center;padding:14px 20px;background:#0b1020ee;border-bottom:1px solid var(--line)}h1{font:700 18px/1.2 system-ui;margin:0}.pill{padding:3px 9px;border:1px solid var(--line);border-radius:999px;color:var(--muted)}.live{color:var(--green);border-color:#2e765e}.grid{display:grid;grid-template-columns:minmax(560px,1.3fr) minmax(360px,.7fr);gap:14px;padding:14px}.panel{background:var(--panel);border:1px solid var(--line);border-radius:12px;overflow:hidden}.panel h2{font:600 13px system-ui;margin:0;padding:10px 12px;border-bottom:1px solid var(--line);color:var(--muted)}.agents{display:grid;grid-template-columns:repeat(3,1fr);gap:9px;padding:12px}.agent{min-height:94px;padding:10px;border:1px solid var(--line);border-radius:9px;background:#0d1527;cursor:pointer}.agent:hover{background:#15213a}.agent b{font-family:system-ui}.agent .status{margin-top:9px;color:var(--muted)}.agent.running{border-color:var(--blue);box-shadow:0 0 0 1px #61a8ff33}.agent.completed{border-color:#2c735a}.agent.failed{border-color:var(--red)}.metric{display:inline-block;margin:5px 7px 0 0;color:var(--muted);font-size:12px}.stream{height:330px;overflow:auto;white-space:pre-wrap;word-break:break-word;padding:12px;color:#dce7ff}.stream .head{color:var(--blue);font-weight:700}.events{height:590px;overflow:auto}.event{display:grid;grid-template-columns:74px 118px 1fr;gap:7px;padding:7px 10px;border-bottom:1px solid #1d2940}.event:hover{background:#172139}.event .time,.event .who{color:var(--muted)}.event .type{color:#c9d7f1}.event.error .type{color:var(--red)}.event.done .type{color:var(--green)}.summary{display:flex;gap:18px;flex-wrap:wrap;padding:10px 12px}.summary strong{font-size:18px;color:var(--green)}select{margin-left:auto;max-width:340px;background:var(--panel);color:var(--text);border:1px solid var(--line);border-radius:7px;padding:6px}@media(max-width:980px){.grid{grid-template-columns:1fr}.agents{grid-template-columns:repeat(2,1fr)}}
-input,textarea,button{font:inherit}input,textarea{width:100%;color:var(--text);background:#0d1527;border:1px solid var(--line);border-radius:8px;padding:9px}textarea{min-height:230px;resize:vertical;line-height:1.65}.composer{padding:12px}.fields{display:grid;grid-template-columns:1fr 1fr 130px;gap:9px;margin-bottom:9px}.fields label{color:var(--muted);font-size:12px}.fields input{margin-top:4px}.drop-zone{position:relative}.drop-zone.dragging textarea{border-color:var(--blue);box-shadow:0 0 0 2px #61a8ff44}.actions{display:flex;align-items:center;gap:9px;margin-top:9px}.button,.file-button{display:inline-flex;align-items:center;justify-content:center;min-height:38px;padding:7px 13px;border-radius:8px;border:1px solid var(--line);background:#17233d;color:var(--text);cursor:pointer}.button.primary{background:#2468b5;border-color:#3886d9;font-weight:700}.button:disabled{opacity:.55;cursor:not-allowed}.file-button input{display:none}.counter{margin-left:auto;color:var(--muted);font-size:12px}.job-message{min-height:22px;margin-top:8px;color:var(--muted)}.job-message.error{color:var(--red)}.job-message.success{color:var(--green)}.result{min-height:180px;max-height:480px;overflow:auto;white-space:pre-wrap;word-break:break-word;padding:12px;color:#e8efff}.result-meta{padding:0 12px 10px;color:var(--muted);font-size:12px}@media(max-width:700px){.fields{grid-template-columns:1fr}.actions{flex-wrap:wrap}.counter{margin-left:0}}
+:root{color-scheme:light;--bg:#f7f8fa;--panel:#ffffff;--line:#e5e7eb;--text:#1f2329;--muted:#6b7280;--faint:#9ca3af;--blue:#2563eb;--blue-soft:#eff4ff;--blue-ring:rgba(37,99,235,.12);--green:#16a34a;--green-soft:#eafaf0;--red:#dc2626;--red-soft:#fef2f2;--radius:10px;--shadow:0 1px 2px rgba(16,24,40,.05);--sans:system-ui,-apple-system,'Segoe UI',sans-serif;--mono:ui-monospace,Consolas,monospace}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--text);font:14px/1.6 var(--sans)}
+header{position:sticky;top:0;z-index:10;display:flex;align-items:center;gap:14px;flex-wrap:wrap;padding:12px 24px;background:var(--panel);border-bottom:1px solid var(--line)}
+.brand{display:flex;align-items:center;gap:10px;min-width:0}
+.logo{width:26px;height:26px;color:var(--blue);flex:none}
+h1{margin:0;font-size:16px;font-weight:600;line-height:1.3}
+.subtitle{margin:0;font-size:12px;color:var(--faint)}
+.topbar-right{margin-left:auto;display:flex;align-items:center;gap:10px;flex-wrap:wrap}
+.pill{display:inline-flex;align-items:center;padding:3px 11px;border-radius:999px;background:#f3f4f6;color:var(--muted);font-size:12px;white-space:nowrap}
+.pill.live{background:var(--green-soft);color:var(--green)}
+.pill.busy{background:var(--blue-soft);color:var(--blue)}
+.pill.bad{background:var(--red-soft);color:var(--red)}
+.run-picker{display:inline-flex;align-items:center;gap:8px;font-size:12px;color:var(--muted)}
+select{max-width:300px;padding:6px 10px;border:1px solid var(--line);border-radius:var(--radius);background:var(--panel);color:var(--text);font:13px var(--sans)}
+select:focus-visible{outline:none;border-color:var(--blue);box-shadow:0 0 0 3px var(--blue-ring)}
+.grid{display:grid;grid-template-columns:minmax(0,1fr) 400px;gap:20px;max-width:1480px;margin:0 auto;padding:20px 24px 36px}
+.main-col{display:flex;flex-direction:column;gap:20px;min-width:0}
+.panel{background:var(--panel);border:1px solid var(--line);border-radius:var(--radius);box-shadow:var(--shadow)}
+.panel h2{display:flex;align-items:baseline;gap:8px;margin:0;padding:13px 16px;border-bottom:1px solid var(--line);font-size:13px;font-weight:600;color:var(--text)}
+.h2-hint{font-size:12px;font-weight:400;color:var(--faint)}
+.composer{padding:16px}
+.fields{display:grid;grid-template-columns:1fr 1fr 140px;gap:12px;margin-bottom:12px}
+.fields label{font-size:12px;color:var(--muted)}
+.fields input{margin-top:5px}
+input,textarea{font:13px/1.6 var(--sans)}
+input,textarea{width:100%;padding:8px 10px;border:1px solid var(--line);border-radius:var(--radius);background:var(--panel);color:var(--text)}
+input:focus-visible,textarea:focus-visible{outline:none;border-color:var(--blue);box-shadow:0 0 0 3px var(--blue-ring)}
+input::placeholder,textarea::placeholder{color:var(--faint)}
+textarea{display:block;min-height:220px;resize:vertical;line-height:1.7}
+.drop-zone.dragging textarea{border-color:var(--blue);box-shadow:0 0 0 3px var(--blue-ring)}
+.actions{display:flex;align-items:center;gap:10px;margin-top:12px;flex-wrap:wrap}
+.btn{display:inline-flex;align-items:center;justify-content:center;gap:6px;min-height:36px;padding:7px 14px;border:1px solid var(--line);border-radius:var(--radius);background:var(--panel);color:var(--text);font:500 13px var(--sans);cursor:pointer}
+.btn:hover{background:#f9fafb}
+.btn:focus-visible{outline:none;box-shadow:0 0 0 3px var(--blue-ring)}
+.btn.primary{background:var(--blue);border-color:var(--blue);color:#ffffff;font-weight:600}
+.btn.primary:hover{background:#1e50c8}
+.btn:disabled{opacity:.55;cursor:not-allowed}
+.file-button input{display:none}
+.counter{margin-left:auto;font-size:12px;color:var(--faint)}
+.job-message{min-height:22px;margin-top:10px;font-size:12px;color:var(--muted)}
+.job-message.error{color:var(--red)}
+.job-message.success{color:var(--green)}
+.summary{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:14px;padding:14px 16px}
+.stat-label{display:block;margin-bottom:4px;font-size:12px;color:var(--faint)}
+.summary b,.summary strong{font-size:15px;font-weight:600;color:var(--text);word-break:break-all}
+.summary .mono{font-family:var(--mono);font-size:13px}
+#qa.pass{color:var(--green)}
+#qa.fail{color:var(--red)}
+.agents{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:12px;padding:14px 16px}
+.agent{padding:12px;border:1px solid var(--line);border-radius:var(--radius);background:var(--panel);cursor:pointer;transition:border-color .15s ease,box-shadow .15s ease}
+.agent:hover{border-color:#d3d8e0}
+.agent:focus-visible{outline:none;box-shadow:0 0 0 3px var(--blue-ring)}
+.agent.viewing{border-color:var(--blue);box-shadow:0 0 0 3px var(--blue-ring)}
+.agent-head{display:flex;align-items:baseline;justify-content:space-between;gap:8px}
+.agent-name{font-size:13px;font-weight:600}
+.agent-role{font-size:11px;color:var(--faint)}
+.badge{display:inline-flex;align-items:center;gap:6px;margin-top:10px;padding:2px 10px;border-radius:999px;background:#f3f4f6;color:var(--muted);font-size:12px}
+.badge .dot{width:7px;height:7px;border-radius:50%;background:var(--faint)}
+.badge.running{background:var(--blue-soft);color:var(--blue)}
+.badge.running .dot{background:var(--blue);animation:pulse 1.4s ease-out infinite}
+.badge.completed{background:var(--green-soft);color:var(--green)}
+.badge.completed .dot{background:var(--green)}
+.badge.failed{background:var(--red-soft);color:var(--red)}
+.badge.failed .dot{background:var(--red)}
+@keyframes pulse{0%{box-shadow:0 0 0 0 rgba(37,99,235,.35)}70%{box-shadow:0 0 0 6px rgba(37,99,235,0)}100%{box-shadow:0 0 0 0 rgba(37,99,235,0)}}
+.metrics{display:flex;flex-wrap:wrap;gap:4px 10px;margin-top:10px;min-height:16px;font-size:11px;color:var(--faint)}
+.stream{min-height:200px;max-height:360px;overflow:auto;white-space:pre-wrap;word-break:break-word;padding:14px 16px;font:13px/1.7 var(--mono);color:var(--text)}
+.stream .head{color:var(--blue);font-weight:700}
+.result{min-height:180px;max-height:480px;overflow:auto;white-space:pre-wrap;word-break:break-word;padding:14px 16px;font:13px/1.8 var(--mono);color:var(--text)}
+.result-meta{padding:0 16px 14px;font-size:12px;color:var(--faint)}
+.events-panel{align-self:start;position:sticky;top:82px}
+.events{height:640px;max-height:calc(100vh - 150px);overflow:auto}
+.event{display:grid;grid-template-columns:62px 92px 1fr;gap:8px;align-items:baseline;padding:8px 14px;border-bottom:1px solid #f1f2f4;font-size:12px}
+.event:last-child{border-bottom:none}
+.event:hover{background:#fafbfc}
+.event .time{font-family:var(--mono);color:var(--faint)}
+.event .who{color:var(--muted);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.event .type{color:var(--text);word-break:break-word}
+.event.error .type{color:var(--red)}
+.event.done .type{color:var(--green)}
+@media(max-width:900px){header{padding:12px 16px}.topbar-right{margin-left:0}.grid{grid-template-columns:1fr;padding:14px 16px 28px}.events-panel{position:static}.events{height:auto;max-height:480px}.agents{grid-template-columns:repeat(2,minmax(0,1fr))}.fields{grid-template-columns:1fr}.summary{grid-template-columns:repeat(2,minmax(0,1fr))}.counter{margin-left:0}}
 </style></head>
-<body><header><h1>MANT · 浏览器翻译工作台</h1><span id="connection" class="pill">连接中</span><span id="runStatus" class="pill">等待运行</span><select id="runSelect"><option value="">最新运行</option></select></header>
-<main class="grid"><section>
-<div class="panel"><h2>输入原文 · 可直接粘贴或拖入 TXT</h2><div class="composer">
+<body><header><div class="brand"><svg class="logo" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m5 8 6 6"/><path d="m4 14 6-6 2-3"/><path d="M2 5h12"/><path d="M7 2h1"/><path d="m22 22-5-10-5 10"/><path d="M14 18h6"/></svg><div><h1>MANT · 浏览器翻译工作台</h1><p class="subtitle">多智能体协作翻译 · 实时可观测</p></div></div><div class="topbar-right"><span id="connection" class="pill">连接中</span><span id="runStatus" class="pill">等待运行</span><label class="run-picker">历史运行<select id="runSelect"><option value="">最新运行</option></select></label></div></header>
+<main class="grid"><section class="main-col">
+<div class="panel"><h2>输入原文<span class="h2-hint">可直接粘贴文本，或拖入 UTF-8 TXT 文件</span></h2><div class="composer">
 <div class="fields"><label>作品 ID<input id="workInput" value="demo_work" maxlength="80"></label><label>章节 ID<input id="chapterInput" placeholder="留空则自动生成" maxlength="80"></label><label>最大返工<input id="reworkInput" type="number" value="2" min="0" max="10"></label></div>
 <div id="dropZone" class="drop-zone"><textarea id="sourceText" placeholder="在这里粘贴需要翻译的中文原文，或把 UTF-8 .txt 文件拖到此区域……"></textarea></div>
-<div class="actions"><label class="file-button">选择 TXT<input id="fileInput" type="file" accept=".txt,text/plain"></label><button id="translateButton" class="button primary">开始翻译</button><button id="clearButton" class="button">清空</button><span id="charCount" class="counter">0 字符</span></div>
+<div class="actions"><label class="btn file-button"><svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><path d="M14 2v6h6"/></svg>选择 TXT<input id="fileInput" type="file" accept=".txt,text/plain"></label><button id="translateButton" class="btn primary" type="button">开始翻译</button><button id="clearButton" class="btn" type="button">清空</button><span id="charCount" class="counter">0 字符</span></div>
 <div id="jobMessage" class="job-message">任务将在后台执行，下方会实时显示每个 Agent 的状态与输出。</div>
 </div></div>
-<div class="panel" style="margin-top:14px"><h2>运行概览</h2><div class="summary"><span>Run<br><b id="runId">—</b></span><span>作品 / 章节<br><b id="work">—</b></span><span>QA<br><strong id="qa">—</strong></span><span>返工<br><b id="rework">0</b></span></div></div>
-<div class="panel" style="margin-top:14px"><h2>Agent 状态</h2><div id="agents" class="agents"></div></div>
-<div class="panel" style="margin-top:14px"><h2>LLM 流式输出 · 点击 Agent 可切换</h2><div id="stream" class="stream">等待模型输出…</div></div>
-<div class="panel" style="margin-top:14px"><h2>最终译文</h2><div id="resultText" class="result">翻译完成后将在这里显示最终译文。</div><div id="resultMeta" class="result-meta"></div></div></section>
-<aside class="panel"><h2>事件时间线</h2><div id="events" class="events"></div></aside></main>
+<div class="panel"><h2>运行概览</h2><div class="summary"><div><span class="stat-label">Run</span><b id="runId" class="mono">—</b></div><div><span class="stat-label">作品 / 章节</span><b id="work">—</b></div><div><span class="stat-label">QA</span><strong id="qa">—</strong></div><div><span class="stat-label">返工</span><b id="rework">0</b></div></div></div>
+<div class="panel"><h2>Agent 状态<span class="h2-hint">点击卡片可切换下方流式输出视角</span></h2><div id="agents" class="agents"></div></div>
+<div class="panel"><h2>LLM 流式输出</h2><div id="stream" class="stream">等待模型输出…</div></div>
+<div class="panel"><h2>最终译文</h2><div id="resultText" class="result">翻译完成后将在这里显示最终译文。</div><div id="resultMeta" class="result-meta"></div></div></section>
+<aside class="panel events-panel"><h2>事件时间线</h2><div id="events" class="events"></div></aside></main>
 <script>
 const $=id=>document.getElementById(id),connection=$('connection'),runStatus=$('runStatus'),runSelect=$('runSelect'),runId=$('runId'),work=$('work'),qa=$('qa'),rework=$('rework'),agents=$('agents'),streamBox=$('stream'),events=$('events'),workInput=$('workInput'),chapterInput=$('chapterInput'),reworkInput=$('reworkInput'),sourceText=$('sourceText'),dropZone=$('dropZone'),fileInput=$('fileInput'),translateButton=$('translateButton'),clearButton=$('clearButton'),charCount=$('charCount'),jobMessage=$('jobMessage'),resultText=$('resultText'),resultMeta=$('resultMeta');
 const roles=['orchestrator','terminologist','translator','editor','polisher','qa'];
 const roleName={orchestrator:'调度',terminologist:'术语',translator:'翻译',editor:'审校',polisher:'润色',qa:'QA 终审'};
+const statusText={waiting:'等待',running:'运行中',completed:'已完成',failed:'失败'};
 const runs=new Map();let selected='';
 function state(id){if(!runs.has(id))runs.set(id,{events:[],agents:{},outputs:{},outputByAgent:{},summary:{}});return runs.get(id)}
 function esc(s){return String(s??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]))}
@@ -55,15 +135,17 @@ function current(){return selected||[...runs.keys()].at(-1)||''}
 function ensureOption(id){if(![...runSelect.options].some(o=>o.value===id)){let o=document.createElement('option');o.value=id;o.textContent=id;runSelect.appendChild(o)}if(selected===id)runSelect.value=id}
 function ingest(e){const s=state(e.run_id);s.events.push(e);if(s.events.length>800)s.events.shift();ensureOption(e.run_id);const a=e.agent||e.node||'workflow';if(e.event_type==='agent.started')s.agents[a]={status:'running',started:e.timestamp,tier:e.tier,segment:e.segment_id};if(e.event_type==='agent.completed')s.agents[a]={...(s.agents[a]||{}),status:e.payload.ok===false?'failed':'completed',ms:e.metrics.duration_ms};if(e.event_type==='agent.failed')s.agents[a]={...(s.agents[a]||{}),status:'failed'};if(e.event_type==='llm.token'){const id=e.payload.call_id||a;s.outputs[id]=(s.outputs[id]||'')+(e.payload.delta||'');s.outputByAgent[a]=id;s.outputAgent=a;s.outputCall=id}if(e.event_type==='run.started')s.summary={...s.summary,status:'running',work:e.work_id,chapter:e.chapter_id};if(e.event_type==='run.completed')s.summary={...s.summary,status:'completed',...e.payload,ms:e.metrics.duration_ms};if(e.event_type==='run.failed')s.summary={...s.summary,status:'failed',error:e.payload.error};if(!selected||selected===e.run_id)render(e.run_id)}
 function showAgent(role){const id=current();if(!id)return;state(id).displayAgent=role;render(id)}
-function render(id){if(!id||!runs.has(id))return;const s=runs.get(id);runId.textContent=id;work.textContent=(s.summary.work||'—')+' / '+(s.summary.chapter||'—');qa.textContent=s.summary.qa_verdict?`${s.summary.qa_verdict} (${s.summary.qa_score??0})`:'—';rework.textContent=s.summary.rework_count??0;runStatus.textContent=s.summary.status||'running';runStatus.className='pill '+(s.summary.status==='completed'?'live':'');agents.innerHTML=roles.map(r=>{const a=s.agents[r]||{status:'waiting'};return `<div class="agent ${a.status}" onclick="showAgent('${r}')"><b>${roleName[r]}</b><div class="status">${a.status}</div><span class="metric">${a.tier||''}</span><span class="metric">${a.ms?Math.round(a.ms)+' ms':''}</span><div class="metric">${esc(a.segment||'')}</div></div>`}).join('');const outputAgent=s.displayAgent||s.outputAgent,call=s.outputByAgent[outputAgent]||s.outputCall;streamBox.innerHTML=call?`<span class="head">[${esc(outputAgent)}]</span>\n${esc(s.outputs[call])}`:'等待模型输出…';streamBox.scrollTop=streamBox.scrollHeight;events.innerHTML=s.events.slice(-250).reverse().map(e=>{const cls=/failed/.test(e.event_type)?'error':/completed/.test(e.event_type)?'done':'';const t=(e.timestamp||'').slice(11,19);const who=e.agent||e.node||'workflow';let detail=e.event_type;if(e.event_type==='workflow.route')detail+=' → '+(e.payload.route||'');return `<div class="event ${cls}"><span class="time">${t}</span><span class="who">${esc(who)}</span><span class="type">${esc(detail)}</span></div>`}).join('')}
+function render(id){if(!id||!runs.has(id))return;const s=runs.get(id);runId.textContent=id;work.textContent=(s.summary.work||'—')+' / '+(s.summary.chapter||'—');qa.textContent=s.summary.qa_verdict?`${s.summary.qa_verdict} (${s.summary.qa_score??0})`:'—';qa.className=s.summary.qa_verdict==='pass'?'pass':s.summary.qa_verdict==='fail'?'fail':'';rework.textContent=s.summary.rework_count??0;const st=s.summary.status||'running';runStatus.textContent=statusText[st]||st;runStatus.className='pill'+(st==='completed'?' live':st==='failed'?' bad':' busy');const viewing=s.displayAgent||s.outputAgent;agents.innerHTML=roles.map(r=>{const a=s.agents[r]||{status:'waiting'};return `<div class="agent${viewing===r?' viewing':''}" data-role="${r}" role="button" tabindex="0"><div class="agent-head"><span class="agent-name">${roleName[r]}</span><span class="agent-role">${r}</span></div><span class="badge ${a.status}"><span class="dot"></span>${statusText[a.status]||esc(a.status)}</span><div class="metrics"><span>${esc(a.tier||'')}</span><span>${a.ms?Math.round(a.ms)+' ms':''}</span><span>${esc(a.segment||'')}</span></div></div>`}).join('');const call=s.outputByAgent[viewing]||s.outputCall;streamBox.innerHTML=call?`<span class="head">[${esc(viewing)}]</span>\n${esc(s.outputs[call])}`:'等待模型输出…';streamBox.scrollTop=streamBox.scrollHeight;events.innerHTML=s.events.slice(-250).reverse().map(e=>{const cls=/failed/.test(e.event_type)?'error':/completed/.test(e.event_type)?'done':'';const t=(e.timestamp||'').slice(11,19);const who=e.agent||e.node||'workflow';let detail=e.event_type;if(e.event_type==='workflow.route')detail+=' → '+(e.payload.route||'');return `<div class="event ${cls}"><span class="time">${t}</span><span class="who">${esc(who)}</span><span class="type">${esc(detail)}</span></div>`}).join('')}
 function setJobMessage(text,kind=''){jobMessage.textContent=text;jobMessage.className='job-message '+kind}
 function updateCount(){charCount.textContent=`${sourceText.value.length} 字符`}
 async function loadFile(file){if(!file)return;if(!file.name.toLowerCase().endsWith('.txt')&&file.type!=='text/plain'){setJobMessage('请选择 TXT 文本文件。','error');return}try{sourceText.value=await file.text();if(!chapterInput.value)chapterInput.value=file.name.replace(/\.txt$/i,'');updateCount();setJobMessage(`已载入 ${file.name}，共 ${sourceText.value.length} 字符。`,'success')}catch(e){setJobMessage(`读取文件失败：${e.message}`,'error')}}
 async function pollJob(id){while(true){await new Promise(resolve=>setTimeout(resolve,1000));try{const response=await fetch(`/api/jobs/${encodeURIComponent(id)}`,{cache:'no-store'}),job=await response.json();if(!response.ok)throw new Error(job.error||'任务查询失败');if(job.status==='completed'){resultText.textContent=job.result_text||'（译文为空）';const m=job.metadata||{};resultMeta.textContent=`输出：${job.output_path} · QA=${m.qa_verdict??'—'} · score=${m.qa_score??'—'}`;setJobMessage('翻译完成。','success');translateButton.disabled=false;return}if(job.status==='failed'){setJobMessage(`翻译失败：${job.error||'未知错误'}`,'error');translateButton.disabled=false;return}setJobMessage(`任务 ${id} 正在运行，请保持页面打开……`)}catch(e){setJobMessage(`任务状态查询失败，稍后自动重试：${e.message}`,'error')}}}
 async function startTranslation(){const text=sourceText.value;if(!text.trim()){setJobMessage('请粘贴原文或拖入一个非空 TXT 文件。','error');sourceText.focus();return}translateButton.disabled=true;resultText.textContent='翻译进行中……';resultMeta.textContent='';setJobMessage('正在提交任务……');try{const response=await fetch('/api/translate',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({text,work_id:workInput.value,chapter_id:chapterInput.value,max_rework:Number(reworkInput.value)})}),job=await response.json();if(!response.ok)throw new Error(job.error||'提交失败');selected=job.run_id;ensureOption(job.run_id);runSelect.value=job.run_id;setJobMessage(`任务 ${job.job_id} 已提交，正在启动 Agent……`,'success');pollJob(job.job_id)}catch(e){setJobMessage(`提交失败：${e.message}`,'error');translateButton.disabled=false}}
 sourceText.addEventListener('input',updateCount);fileInput.addEventListener('change',()=>loadFile(fileInput.files[0]));clearButton.addEventListener('click',()=>{sourceText.value='';fileInput.value='';resultText.textContent='翻译完成后将在这里显示最终译文。';resultMeta.textContent='';updateCount();sourceText.focus()});translateButton.addEventListener('click',startTranslation);['dragenter','dragover'].forEach(name=>dropZone.addEventListener(name,e=>{e.preventDefault();dropZone.classList.add('dragging')}));['dragleave','drop'].forEach(name=>dropZone.addEventListener(name,e=>{e.preventDefault();dropZone.classList.remove('dragging')}));dropZone.addEventListener('drop',e=>loadFile(e.dataTransfer.files[0]));
-runSelect.onchange=()=>{selected=runSelect.value;render(current())};
-const source=new EventSource('/events');source.onopen=()=>{connection.textContent='● 实时连接';connection.className='pill live'};source.onerror=()=>{connection.textContent='重连中';connection.className='pill'};source.onmessage=msg=>{try{ingest(JSON.parse(msg.data))}catch(e){console.error(e)}};
+runSelect.addEventListener('change',()=>{selected=runSelect.value;render(current())});
+agents.addEventListener('click',e=>{const card=e.target.closest('.agent');if(card)showAgent(card.dataset.role)});
+agents.addEventListener('keydown',e=>{if(e.key!=='Enter'&&e.key!==' ')return;const card=e.target.closest('.agent');if(card){e.preventDefault();showAgent(card.dataset.role)}});
+const source=new EventSource('/events');source.onopen=()=>{connection.textContent='实时已连接';connection.className='pill live'};source.onerror=()=>{connection.textContent='重连中';connection.className='pill'};source.onmessage=msg=>{try{ingest(JSON.parse(msg.data))}catch(e){console.error(e)}};
 fetch('/api/health').then(r=>r.json()).then(h=>{if(h.active_job_id){selected=h.active_job_id;translateButton.disabled=true;setJobMessage(`检测到运行中的任务 ${h.active_job_id}，正在重新连接……`);pollJob(h.active_job_id)}}).catch(()=>{});updateCount();
 </script></body></html>"""
 
