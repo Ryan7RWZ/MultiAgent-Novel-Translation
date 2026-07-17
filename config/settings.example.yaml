@@ -1,0 +1,47 @@
+# ============================================================================
+# MANT 配置模板
+# 使用：复制为 config/settings.yaml 后按本机环境修改（settings.yaml 已 gitignore）。
+# 约定：各模块通过参数接收配置字典，不直接读取本文件（CLI / 脚本入口除外）。
+# ============================================================================
+
+llm:
+  # LLMClient 分 fast / strong 两档：高频轻量调用走 fast，质量敏感调用走 strong。
+  providers:
+    fast:
+      base_url: "https://api.openai.com/v1"
+      model: "gpt-4o-mini"
+      api_key_env: "OPENAI_API_KEY"   # key 从环境变量读取，禁止写入配置文件
+    strong:
+      base_url: "https://api.openai.com/v1"
+      model: "gpt-4o"
+      api_key_env: "OPENAI_API_KEY"
+
+memory:
+  sqlite_path: "data/memory/mant.db"   # 术语库 / 翻译记忆库 TM（预留可切 Postgres）
+  faiss_index_dir: "data/memory/faiss" # FAISS 向量索引目录（RAG 检索）
+
+pipeline:
+  raw_dir: "data/raw"                  # M1 采集的原始语料
+  aligned_dir: "data/aligned"          # 句对齐后的平行语料
+  glossary_dir: "data/glossary"        # 术语抽取结果 / 术语库导出
+  glossary_db: "data/memory/mant.db"   # 运行时术语库；与 memory.sqlite_path 保持一致
+
+workflow:
+  max_rework: 2                        # QA 不达标允许的最大回退返工次数
+
+observability:
+  enabled: true                        # 统一启用终端事件与运行追踪
+  trace_dir: "data/traces"             # 每次运行一个 JSONL，供 SSE 监控页实时读取
+  sqlite_path: "data/traces/runs.db"   # 运行摘要与非 token 事件，便于查询/评估
+  terminal:
+    enabled: true                      # 默认显示 Agent 起止状态
+    stream_tokens: false               # CLI --stream 可临时开启真实 token 输出
+    verbose: false                     # CLI --verbose 可显示节点/路由/重试细节
+  trace:
+    enabled: true
+    sqlite_enabled: true
+    token_batch_chars: 80              # 合批写盘，兼顾实时性与 I/O 压力
+  dashboard:
+    host: "127.0.0.1"                  # 默认仅本机访问，避免泄露文本与运行轨迹
+    port: 8765
+    max_input_chars: 200000            # 浏览器粘贴/拖入文本的字符上限
