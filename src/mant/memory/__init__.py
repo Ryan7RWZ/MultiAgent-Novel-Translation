@@ -102,6 +102,10 @@ class MemoryHub:
         """批量查询术语在指定作品下的约定译法；未命中术语不出现在结果中。"""
         return self.glossary.lookup(terms, work_id)
 
+    def match_terms(self, source_text: str, work_id: str) -> dict[str, TermEntry]:
+        """直接匹配原文中已入库的术语，不依赖 LLM 先抽取候选。"""
+        return self.glossary.match_text(source_text, work_id)
+
     def search_tm(self, source_text: str, work_id: str, k: int = 5) -> list[TMMatch]:
         """检索翻译记忆库中与 source_text 最相似的 k 条历史句对。
 

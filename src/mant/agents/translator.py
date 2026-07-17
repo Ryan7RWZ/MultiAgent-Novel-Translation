@@ -119,22 +119,42 @@ def _render_tm_matches(tm_matches: Any) -> str:
     return "\n".join(lines) or empty_hint
 
 
+def _render_review_notes(review_notes: Any) -> str:
+    """把审校/QA 批注渲染为返工硬约束；首次翻译返回明确占位。"""
+    if not review_notes:
+        return "（首次翻译，无返工批注）"
+    lines: list[str] = []
+    for note in review_notes:
+        if isinstance(note, dict):
+            severity = str(note.get("severity", "?")).strip()
+            issue_type = str(note.get("issue_type", "?")).strip()
+            span = str(note.get("span", "")).strip()
+            suggestion = str(note.get("suggestion", "")).strip()
+            detail = suggestion or str(note.get("detail", "")).strip()
+            lines.append(f"- [{severity}/{issue_type}] {detail}（位置：{span or '未标注'}）")
+        else:
+            text = str(note).strip()
+            if text:
+                lines.append(f"- {text}")
+    return "\n".join(lines) or "（首次翻译，无返工批注）"
+
+
 # ----------------------------------------------------------------------
 # 译者 Agent
 # ----------------------------------------------------------------------
 class TranslatorAgent(BaseAgent):
     """初译 Agent：在术语 / 小说圣经 / 翻译记忆注入下产出译文初稿。
 
-    - 模型档位：``fast``（高频调用、成本优先，质量由审校 / QA 终审兜底）。
+    - 模型档位：``strong``（初译质量优先，降低后续审校与返工负担）。
     - 输入：``task.source_text`` 待译原文；记忆注入材料从 ``task.context``
       读取，键为 ``glossary`` / ``story_bible`` / ``tm_matches`` /
-      ``prev_summary``（与 ``mant.workflow.state.TranslationState`` 对齐）。
+      ``prev_summary`` / ``review_notes`` / ``round``（与工作流上下文对齐）。
     - 输出：``AgentResult.output = {"draft": str}`` —— 译文初稿。
     """
 
     name: str = "translator"
     #: 期望模型档位，供调度 / 工厂用 ``LLMClient.with_tier`` 挑选客户端
-    tier: str = "fast"
+    tier: str = "strong"
     #: 采样温度：初译保留少量灵活性，但不发散
     temperature: float = 0.3
     #: 单次补全最大 token 数
@@ -151,6 +171,13 @@ class TranslatorAgent(BaseAgent):
 1. 忠实原文：剧情、人物、设定、对白含义不得遗漏或篡改，禁止自行增删情节。
 2. 网文文风：节奏明快、对白生动、画面感强，保留爽点与悬念感；避免逐字硬译与翻译腔。
 3. 术语一致：下列术语表中的约定译法必须严格遵循，不得另造译名。
+
+【返工轮次】
+第 {round} 轮。若下方存在返工批注，必须逐条修复；返工批注的优先级高于
+翻译记忆和一般文风偏好，但不得违反原文事实与术语表。
+
+【返工批注（最高优先级）】
+{review_notes}
 
 【术语表】
 {glossary}
@@ -189,6 +216,8 @@ class TranslatorAgent(BaseAgent):
         story_bible_text = _render_story_bible(task.context.get("story_bible"))
         tm_matches_text = _render_tm_matches(task.context.get("tm_matches"))
         prev_summary = str(task.context.get("prev_summary") or "（无前情提要）")
+        review_notes_text = _render_review_notes(task.context.get("review_notes"))
+        round_no = max(0, int(task.context.get("round", 0) or 0))
 
         # 2) 渲染 Prompt（系统提示词含记忆注入槽位，用户提示词承载原文）
         system = self.build_user_prompt(
@@ -197,6 +226,8 @@ class TranslatorAgent(BaseAgent):
             story_bible=story_bible_text,
             tm_matches=tm_matches_text,
             prev_summary=prev_summary,
+            review_notes=review_notes_text,
+            round=round_no,
         )
         user = self.build_user_prompt(
             self.USER_PROMPT_TEMPLATE, source_text=task.source_text

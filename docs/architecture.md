@@ -23,14 +23,14 @@ flowchart TB
     subgraph L1["① 翻译主流程层（LangGraph 状态机，mant.workflow）"]
         direction LR
         T["翻译 Agent<br>translator"]
-        R["审校 Agent<br>reviewer"]
+        R["审校 Agent<br>editor"]
         P["润色 Agent<br>polisher"]
         Q{"QA 终审<br>qa"}
         DONE["成品译文"]
         T --> R --> P --> Q
         Q -->|"pass（qa_score 达标）"| DONE
-        Q -->|"fail（携带批注回退，<br>rework_count &lt; max_rework）"| T
-        Q -->|"fail 且达到 max_rework<br>（强制放行并标记人工复核）"| DONE
+        Q -->|"rework（携带批注回退，<br>rework_count &lt; max_rework）"| T
+        Q -->|"rework 且达到 max_rework<br>（强制放行并标记人工复核）"| DONE
     end
 
     subgraph L2["② 协作控制层（mant.agents）"]
@@ -71,6 +71,7 @@ flowchart TB
 | ② 协作控制层 | `mant.agents` | 调度 Agent 负责任务分派与回环控制；术语 Agent 负责术语全生命周期管理 |
 | ③ 记忆与数据层 | `mant.memory` | MemoryHub 统一门面，屏蔽术语库（SQLite/可切 Postgres）、小说圣经、TM、FAISS 向量库的存储细节 |
 | ④ 离线大数据管道 | `mant.pipeline` | M1 阶段产物：采集→清洗→句对齐→术语抽取，为线上翻译供给术语库、TM 与向量数据 |
+| 横切可观测层 | `mant.observability` | 汇集工作流、节点、Agent、LLM token 与 QA 路由事件，输出终端、JSONL、SQLite 和 SSE 监控页 |
 
 ## 3. 翻译主流程与 QA 返工回环
 
@@ -87,10 +88,17 @@ flowchart TB
 | `draft` | `str` | 翻译 / 审校 | 当前译稿（审校节点原地修订） |
 | `review_notes` | `list` | 审校 / QA | 批注列表；QA 判 fail 时追加结构化批注，作为回退返工的输入 |
 | `polished` | `str` | 润色 | 润色后的译稿 |
-| `qa_score` | `float` | QA 终审 | 质量分（0–100） |
-| `qa_verdict` | `str` | QA 终审 | `"pass"` / `"fail"` |
+| `qa_score` | `float` | QA 终审 | 质量分（0–10） |
+| `qa_verdict` | `str` | QA 终审 | `"pass"` / `"rework"` |
 | `rework_count` | `int` | 调度（条件边） | 当前回退返工次数 |
 | `max_rework` | `int` | 入口（取自 `workflow.max_rework`） | 回退次数上限，防止死循环 |
+| `story_bible` | `Any` | retrieve | 本次运行的小说圣经检索结果 |
+| `tm_matches` | `list[dict]` | retrieve | 带 segment 索引的 TM 检索结果 |
+| `runtime_notes` | `list[str]` | 各节点 | 记忆故障、降级与解析说明 |
+
+`story_bible` 与 `tm_matches` 必须随 state 流转，不得保存在 compiled graph
+闭包中；这保证同一张图被多个章节并发复用时不会串数据。LLM token 增量只进入
+事件总线，不进入 state，避免高频增量触发 LangGraph checkpoint 膨胀。
 
 ### 3.2 主流程时序
 
@@ -111,9 +119,9 @@ sequenceDiagram
         S->>S: QA 终审（打分 + 判决）
         alt qa_verdict == pass
             S-->>O: polished + qa_score
-        else fail 且 rework_count < max_rework
+        else rework 且 rework_count < max_rework
             S->>S: 批注并入 review_notes，rework_count+1，回退翻译节点
-        else fail 且达到上限
+        else rework 且达到上限
             S-->>O: 强制放行，标记 needs_human_review
         end
     end
@@ -122,7 +130,7 @@ sequenceDiagram
 
 ### 3.3 回环设计要点
 
-- **批注驱动返工**：QA 判 fail 时必须给出结构化批注（错误位置、类型、修改建议），追加到 `review_notes`；翻译节点在下一轮把批注作为硬约束注入 Prompt，而不是盲目重译。
+- **批注驱动返工**：QA 判 rework 时必须给出结构化批注（错误位置、类型、修改建议），追加到 `review_notes`；翻译节点在下一轮把批注作为硬约束注入 Prompt，而不是盲目重译。
 - **上限兜底**：`rework_count >= max_rework` 时强制放行并打 `needs_human_review` 标记，避免 LLM 间互相不认可导致的死循环与费用失控。上限默认值取配置 `workflow.max_rework`。
 - **回退落点**：当前设计回退到"翻译"节点（携带审校与 QA 的全部批注重译）；如实验表明重译不如定点修订，可在 M4 联调期改为回退到"审校"节点，状态机条件边留有此扩展点。
 
@@ -142,6 +150,7 @@ sequenceDiagram
 | 方法签名 | 用途 |
 | --- | --- |
 | `lookup_terms(terms: list[str], work_id: str) -> dict[str, TermEntry]` | 批量查询术语译名 |
+| `match_terms(source_text: str, work_id: str) -> dict[str, TermEntry]` | 直接命中原文中已有术语（无 key 也生效） |
 | `search_tm(source_text: str, work_id: str, k: int = 5) -> list[TMMatch]` | 检索相似历史句对（翻译记忆） |
 | `get_story_bible(work_id: str) -> StoryBible` | 读取小说圣经（角色/设定/时间线） |
 | `record_terms(entries: list[TermEntry]) -> None` | 术语入库 |
@@ -237,6 +246,7 @@ erDiagram
 | `memory.faiss_index_dir` | MemoryHub | FAISS 索引目录 |
 | `pipeline.raw_dir` / `pipeline.aligned_dir` / `pipeline.glossary_dir` | 管道四步 | 语料与产物目录 |
 | `workflow.max_rework` | 状态机入口 | QA 回退次数上限 |
+| `observability.*` | CLI / 可观测层 | 终端流式显示、JSONL/SQLite 路径、token 合批与本地监控地址 |
 
 约定：除 CLI/脚本入口外，所有模块通过构造参数接收配置字典，不直接读取配置文件。
 
@@ -247,6 +257,7 @@ src/mant/
 ├── llm/            # LLMClient：fast/strong 双档，缺 key 返回 [DRAFT] 占位
 ├── agents/         # base.py（AgentTask/AgentResult/BaseAgent）+ 六个 Agent
 ├── workflow/       # state.py（TranslationState）+ LangGraph 图构建与条件边
+├── observability/  # 类型化事件、终端/JSONL/SQLite sink、本地 SSE 监控页
 ├── memory/         # models.py（dataclass）+ MemoryHub 门面 + SQLite/FAISS 适配
 ├── pipeline/       # M1 四步：collect / clean / align / extract_terms
 ├── eval/           # M5 评测：COMET、LLM-as-Judge、MQM 汇总脚本
@@ -260,3 +271,5 @@ src/mant/
 3. **数据模型**：一律 `dataclass`；中文 docstring + 中文注释 + 类型注解。
 4. **Agent 统一接口**：`BaseAgent(llm, memory=None)`，抽象方法 `run(task: AgentTask) -> AgentResult`；`AgentTask` 字段为 `work_id, chapter_id, segment_id, source_text, context`；`AgentResult` 字段为 `agent, ok, output, notes`。各 Agent 的 `output` 键约定见 agent-design.md 第 2 节。
 5. **LLM 占位行为**：未配置 API key 时 `LLMClient.complete` 返回 `[DRAFT]` 前缀占位响应，保证全链路在无网无 key 环境可跑通演示与单测。
+6. **流式兼容**：`LLMClient.stream_complete` 是底层真实流式接口；`complete` 收集其增量并返回完整文本，旧调用方无需迁移。结构化 JSON 只在流结束后解析。
+7. **观测隔离**：接收器故障不得中断翻译；Prompt 正文与密钥不进入事件，token 事件不写 SQLite，JSONL token 按字符阈值合批。

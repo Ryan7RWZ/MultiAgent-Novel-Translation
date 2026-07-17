@@ -23,15 +23,13 @@
 - 各 Agent 的模型档位按其 ``tier`` 类属性经 ``LLMClient.with_tier`` 选档。
 
 TODO（待团队同步）：
-- 圣经 / TM 检索产物不是 ``TranslationState`` 字段，暂存图内闭包
-  ``shared_ctx`` 供各节点构建 ``AgentTask.context``；并发复用同一 compiled
-  graph 时存在串扰风险，待状态字段扩展后改为状态承载；
 - 回退落点当前固定为 translate（docs §3.3 预留改回 edit 的扩展点）；
 - ``review_notes`` 按轮次标记/清理已解决批注，避免历史批注无限累积。
 """
 
 from __future__ import annotations
 
+import time
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
@@ -42,11 +40,13 @@ from mant.agents.polisher import PolisherAgent
 from mant.agents.qa import QAAgent
 from mant.agents.terminologist import TerminologistAgent
 from mant.agents.translator import TranslatorAgent
+from mant.observability import emit_event, event_scope, run_context
 from mant.workflow.state import DEFAULT_MAX_REWORK, TranslationState, init_state
 
 if TYPE_CHECKING:  # 仅类型标注，避免运行时循环依赖
     from mant.llm.client import LLMClient
     from mant.memory import MemoryHub
+    from mant.observability import RunObserver
 
 __all__ = ["build_graph", "run_chapter", "DEFAULT_MAX_REWORK"]
 
@@ -113,29 +113,46 @@ def build_graph(
     agents = _build_agents(llm, memory)
     terminologist = TerminologistAgent(_pick_client(llm, TerminologistAgent), memory)
 
-    # 检索产物共享上下文（非 TranslationState 字段，见模块 docstring TODO）
-    shared_ctx: dict[str, Any] = {"story_bible": None, "tm_matches": [], "notes": []}
-
     # ------------------------------------------------------------------
-    # 节点定义（闭包捕获 agents / memory / shared_ctx）
+    # 节点定义（检索产物全部随 TranslationState 流转，可并发复用 compiled graph）
     # ------------------------------------------------------------------
     def retrieve_node(state: TranslationState) -> dict:
-        """检索记忆注入：圣经 / TM → shared_ctx；术语表 → state.glossary。"""
+        """检索记忆注入：圣经 / TM / 运行说明与术语表均写入 state。"""
+        runtime_notes: list[str] = []
         glossary: dict[str, Any] = dict(state.get("glossary") or {})
         if memory is None:
-            shared_ctx["notes"].append("memory 为 None，跳过记忆检索注入（离线模式）")
-            return {"glossary": glossary}
+            runtime_notes.append("memory 为 None，跳过记忆检索注入（离线模式）")
+            term_result = terminologist.execute(
+                AgentTask(
+                    work_id=state["work_id"],
+                    chapter_id=state["chapter_id"],
+                    segment_id="chapter",
+                    source_text="\n\n".join(state["segments"]),
+                    context={"mode": "extract", "story_bible": None},
+                )
+            )
+            runtime_notes.extend(term_result.notes)
+            glossary.update(term_result.output.get("glossary") or {})
+            emit_event(
+                "memory.retrieved",
+                payload={"offline": True, "glossary_terms": len(glossary)},
+            )
+            return {
+                "glossary": glossary,
+                "story_bible": None,
+                "tm_matches": [],
+                "runtime_notes": runtime_notes,
+            }
 
         work_id = state["work_id"]
 
         # ① 小说圣经（StoryBible → dict，供 context["story_bible"] 使用）
         try:
             bible = memory.get_story_bible(work_id)
-            shared_ctx["story_bible"] = (
-                bible.to_dict() if hasattr(bible, "to_dict") else bible
-            )
+            story_bible = bible.to_dict() if hasattr(bible, "to_dict") else bible
         except Exception as exc:  # noqa: BLE001 —— 骨架期记忆层故障不阻断流程
-            shared_ctx["notes"].append(f"get_story_bible 失败：{exc!r}")
+            story_bible = None
+            runtime_notes.append(f"get_story_bible 失败：{exc!r}")
 
         # ② 翻译记忆 TM：逐 segment 取 top-k 并序列化
         # TODO: 大章节检索开销控制（限量/去重/按 token 预算截断）；
@@ -153,11 +170,10 @@ def build_graph(
                         }
                     )
             except Exception as exc:  # noqa: BLE001
-                shared_ctx["notes"].append(f"search_tm(seg#{idx}) 失败：{exc!r}")
-        shared_ctx["tm_matches"] = tm_matches
+                runtime_notes.append(f"search_tm(seg#{idx}) 失败：{exc!r}")
 
         # ③ 术语注入：术语 Agent（extract 模式）扫描整章 → 本章生效映射
-        term_result = terminologist.run(
+        term_result = terminologist.execute(
             AgentTask(
                 work_id=work_id,
                 chapter_id=state["chapter_id"],
@@ -165,13 +181,27 @@ def build_graph(
                 source_text="\n\n".join(state["segments"]),
                 context={
                     "mode": "extract",
-                    "story_bible": shared_ctx.get("story_bible"),
+                    "story_bible": story_bible,
                 },
             )
         )
-        shared_ctx["notes"].extend(term_result.notes)
+        runtime_notes.extend(term_result.notes)
         glossary.update(term_result.output.get("glossary") or {})
-        return {"glossary": glossary}
+        emit_event(
+            "memory.retrieved",
+            payload={
+                "offline": False,
+                "has_story_bible": bool(story_bible),
+                "tm_matches": len(tm_matches),
+                "glossary_terms": len(glossary),
+            },
+        )
+        return {
+            "glossary": glossary,
+            "story_bible": story_bible,
+            "tm_matches": tm_matches,
+            "runtime_notes": runtime_notes,
+        }
 
     def translate_node(state: TranslationState) -> dict:
         """逐 segment 初译并拼接；返工轮携带批注并累计 rework_count。"""
@@ -179,7 +209,8 @@ def build_graph(
         rework_count = int(state.get("rework_count", 0))
         if str(state.get("qa_verdict", "")).strip().lower() in _REWORK_VERDICTS:
             rework_count += 1  # 本轮由 QA 判返触发，记一次实际返工
-        tm_matches = shared_ctx.get("tm_matches") or []
+        tm_matches = state.get("tm_matches") or []
+        runtime_notes = list(state.get("runtime_notes") or [])
         parts: list[str] = []
         for idx, seg in enumerate(state["segments"]):
             task = AgentTask(
@@ -190,22 +221,26 @@ def build_graph(
                 context={
                     # 与 TranslatorAgent 已实现的 context 键对齐
                     "glossary": state.get("glossary") or {},
-                    "story_bible": shared_ctx.get("story_bible"),
+                    "story_bible": state.get("story_bible"),
                     "tm_matches": [
                         m for m in tm_matches if m.get("segment_index") == idx
                     ],
                     "prev_summary": "",  # TODO: 由圣经 timeline/上一章摘要生成
-                    # 返工批注（TranslatorAgent 尚未消费该键，TODO 对齐后生效）
+                    # 返工批注由 TranslatorAgent 作为最高优先级硬约束消费
                     "review_notes": notes,
                     "round": rework_count,
                 },
             )
-            result = agents["translator"].run(task)
-            shared_ctx["notes"].extend(result.notes)
+            result = agents["translator"].execute(task)
+            runtime_notes.extend(result.notes)
             # output 键契约 {"draft": str}；失败/空稿时保留原文兜底，不中断链路
             draft = str(result.output.get("draft") or "")
             parts.append(draft if draft.strip() else seg)
-        return {"draft": "\n\n".join(parts), "rework_count": rework_count}
+        return {
+            "draft": "\n\n".join(parts),
+            "rework_count": rework_count,
+            "runtime_notes": runtime_notes,
+        }
 
     def edit_node(state: TranslationState) -> dict:
         """审校：对照原文检查初稿，结构化意见并入 review_notes（不改稿）。"""
@@ -219,13 +254,13 @@ def build_graph(
                 "glossary": state.get("glossary") or {},
             },
         )
-        result = agents["editor"].run(task)
-        shared_ctx["notes"].extend(result.notes)
+        result = agents["editor"].execute(task)
+        runtime_notes = list(state.get("runtime_notes") or []) + result.notes
         # output 键契约 {"review_notes": list[dict]}；TODO: 按轮次清理已解决批注
         merged = list(state.get("review_notes") or []) + list(
             result.output.get("review_notes") or []
         )
-        return {"review_notes": merged}
+        return {"review_notes": merged, "runtime_notes": runtime_notes}
 
     def polish_node(state: TranslationState) -> dict:
         """润色：在审校后的 draft 上做语言润色（不改事实与术语）。"""
@@ -240,11 +275,14 @@ def build_graph(
                 "review_notes": state.get("review_notes") or [],
             },
         )
-        result = agents["polisher"].run(task)
-        shared_ctx["notes"].extend(result.notes)
+        result = agents["polisher"].execute(task)
+        runtime_notes = list(state.get("runtime_notes") or []) + result.notes
         polished = str(result.output.get("polished") or "")
         # 润色失败/空稿时以 draft 兜底，保证 QA 有稿可审
-        return {"polished": polished if polished.strip() else draft}
+        return {
+            "polished": polished if polished.strip() else draft,
+            "runtime_notes": runtime_notes,
+        }
 
     def qa_node(state: TranslationState) -> dict:
         """QA 终审：评分 + pass/rework 裁决；返工建议并入 review_notes。"""
@@ -260,8 +298,8 @@ def build_graph(
                 "review_notes": state.get("review_notes") or [],
             },
         )
-        result = agents["qa"].run(task)
-        shared_ctx["notes"].extend(result.notes)
+        result = agents["qa"].execute(task)
+        runtime_notes = list(state.get("runtime_notes") or []) + result.notes
         out = result.output
         try:
             score = float(out.get("qa_score", 0.0))
@@ -279,7 +317,12 @@ def build_graph(
             state.get("rework_count", 0)
         ) >= _resolve_limit(state, max_rework):
             merged.append("needs_human_review：已达返工上限仍判 rework，强制放行当前稿。")
-        return {"qa_score": score, "qa_verdict": verdict, "review_notes": merged}
+        return {
+            "qa_score": score,
+            "qa_verdict": verdict,
+            "review_notes": merged,
+            "runtime_notes": runtime_notes,
+        }
 
     def _route_after_qa(state: TranslationState) -> str:
         """条件边：rework 且未达上限 → 回 translate 携带批注重译；否则 END。"""
@@ -287,18 +330,52 @@ def build_graph(
         if verdict in _REWORK_VERDICTS and int(
             state.get("rework_count", 0)
         ) < _resolve_limit(state, max_rework):
+            emit_event("workflow.route", payload={"route": "rework", "verdict": verdict})
             return "rework"
+        emit_event("workflow.route", payload={"route": "end", "verdict": verdict})
         return "end"
+
+    def _observed_node(name: str, fn):
+        """为 LangGraph 节点统一补齐起止、耗时与更新字段事件。"""
+        def wrapped(state: TranslationState) -> dict:
+            started = time.perf_counter()
+            with event_scope(node=name, round=int(state.get("rework_count", 0) or 0)):
+                emit_event("node.started", payload={"state_segments": len(state["segments"])})
+                try:
+                    update = fn(state)
+                except Exception as exc:
+                    emit_event(
+                        "node.failed",
+                        payload={"error": type(exc).__name__},
+                        metrics={
+                            "duration_ms": round(
+                                (time.perf_counter() - started) * 1000, 2
+                            )
+                        },
+                    )
+                    raise
+                emit_event(
+                    "node.completed",
+                    payload={"updated_fields": sorted(update)},
+                    metrics={
+                        "duration_ms": round(
+                            (time.perf_counter() - started) * 1000, 2
+                        )
+                    },
+                )
+                return update
+
+        return wrapped
 
     # ------------------------------------------------------------------
     # 组装图
     # ------------------------------------------------------------------
     graph = StateGraph(TranslationState)
-    graph.add_node("retrieve", retrieve_node)
-    graph.add_node("translate", translate_node)
-    graph.add_node("edit", edit_node)
-    graph.add_node("polish", polish_node)
-    graph.add_node("qa", qa_node)
+    graph.add_node("retrieve", _observed_node("retrieve", retrieve_node))
+    graph.add_node("translate", _observed_node("translate", translate_node))
+    graph.add_node("edit", _observed_node("edit", edit_node))
+    graph.add_node("polish", _observed_node("polish", polish_node))
+    graph.add_node("qa", _observed_node("qa", qa_node))
     graph.set_entry_point("retrieve")
     graph.add_edge("retrieve", "translate")
     graph.add_edge("translate", "edit")
@@ -317,7 +394,10 @@ def run_chapter(
     llm: "LLMClient",
     memory: "MemoryHub | None",
     *,
+    chapter_id: str | None = None,
     max_rework: int = DEFAULT_MAX_REWORK,
+    observer: "RunObserver | None" = None,
+    run_id: str | None = None,
 ) -> TranslationState:
     """便捷入口（骨架）：读章节文件 → 调度切分 → 跑状态机 → 返回最终状态。
 
@@ -337,15 +417,66 @@ def run_chapter(
     - 进度回调、断点续跑与失败重试策略。
     """
     path = Path(chapter_path)
-    text = path.read_text(encoding="utf-8")
-    orchestrator = OrchestratorAgent(llm, memory)
-    segments = orchestrator.split_chapter(text)
-    app = build_graph(llm, memory, max_rework=max_rework)
-    initial = init_state(
+    resolved_chapter_id = chapter_id or path.stem
+    started = time.perf_counter()
+    with run_context(
+        observer,
+        run_id=run_id,
         work_id=work_id,
-        chapter_id=path.stem,
-        segments=segments,
-        max_rework=max_rework,
-    )
-    final: TranslationState = app.invoke(initial)
-    return final
+        chapter_id=resolved_chapter_id,
+    ) as active_run_id:
+        emit_event(
+            "run.started",
+            payload={"chapter_path": str(path), "max_rework": max_rework},
+        )
+        try:
+            text = path.read_text(encoding="utf-8")
+            # 翻译入口复用 M1 的确定性清洗，避免广告/重复行污染 Prompt。
+            from mant.pipeline.clean import clean_text
+
+            text = clean_text(text)
+            orchestrator = OrchestratorAgent(llm, memory)
+            split_started = time.perf_counter()
+            with event_scope(agent="orchestrator", node="dispatch", segment_id="chapter"):
+                emit_event("agent.started", payload={"input_chars": len(text)})
+                segments = orchestrator.split_chapter(text)
+                emit_event(
+                    "agent.completed",
+                    payload={"ok": True, "segments": len(segments)},
+                    metrics={
+                        "duration_ms": round(
+                            (time.perf_counter() - split_started) * 1000, 2
+                        )
+                    },
+                )
+            app = build_graph(llm, memory, max_rework=max_rework)
+            initial = init_state(
+                work_id=work_id,
+                chapter_id=resolved_chapter_id,
+                segments=segments,
+                max_rework=max_rework,
+            )
+            final: TranslationState = app.invoke(initial)
+        except Exception as exc:
+            emit_event(
+                "run.failed",
+                payload={"error": type(exc).__name__, "run_id": active_run_id},
+                metrics={
+                    "duration_ms": round((time.perf_counter() - started) * 1000, 2)
+                },
+            )
+            raise
+        emit_event(
+            "run.completed",
+            payload={
+                "run_id": active_run_id,
+                "segments": len(final.get("segments") or []),
+                "qa_score": final.get("qa_score", 0.0),
+                "qa_verdict": final.get("qa_verdict", ""),
+                "rework_count": final.get("rework_count", 0),
+            },
+            metrics={
+                "duration_ms": round((time.perf_counter() - started) * 1000, 2)
+            },
+        )
+        return final

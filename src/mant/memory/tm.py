@@ -95,6 +95,20 @@ class TMStore:
         self._conn.commit()
         return len(rows)
 
+    def replace_pairs(
+        self, pairs: Iterable[tuple[str, str] | dict], work_id: str
+    ) -> int:
+        """用给定句对替换某作品的 TM，使 M1 管道重复运行保持幂等。"""
+        rows = [self._normalize_pair(pair) for pair in pairs]
+        rows = [(source, target) for source, target in rows if source and target]
+        with self._conn:
+            self._conn.execute("DELETE FROM tm_pairs WHERE work_id = ?", (work_id,))
+            self._conn.executemany(
+                "INSERT INTO tm_pairs (work_id, source, target) VALUES (?, ?, ?)",
+                [(work_id, source, target) for source, target in rows],
+            )
+        return len(rows)
+
     def search(self, source_text: str, work_id: str, k: int = 5) -> list[TMMatch]:
         """模糊检索与 source_text 最相似的历史句对（占位实现）。
 

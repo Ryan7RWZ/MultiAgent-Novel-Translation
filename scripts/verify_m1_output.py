@@ -5,7 +5,7 @@
 
     python scripts/verify_m1_output.py \
         --aligned-dir data/aligned \
-        --glossary-db data/glossary/terms.sqlite3 \
+        --glossary-db data/memory/mant.db \
         --terminology docs/sample-terminology.md \
         --min-chapters 3
 
@@ -14,8 +14,11 @@
     2. 逐行 ``json.loads`` 校验：每行必须是含必需键 ``{src, tgt, chapter, index}`` 的对象；
     3. 句对/章节统计：句对总数 > 0，且章节总数（按作品内去重累计）>= ``--min-chapters``；
     4. 术语库可打开、``terms`` 表存在，并统计总条数；
-    5. （可选）提供 ``--terminology`` 时：解析 Markdown 术语表中的源词，
-       统计出现在 ``terms`` 表中的比例（命中率 >= 50% 判 PASS，未命中词条打印供人工复核）。
+    5. 检查对齐句对已经同步写入运行库 ``tm_pairs``；
+    6. 统计术语库非空译名率，防止把空译名候选误当成可用术语资产；
+    7. （可选）检查 Markdown 术语表源词在 ``terms`` 表中的命中率；
+    8. （可选）以人工术语对作为跨语言语义锚点，检查源句含术语时译句是否
+       含约定译名，用于自动发现长度对齐造成的系统性错位。
 
 退出码：0 = 全部 PASS；1 = 存在 FAIL 或输入路径有误。
 输入目录/文件不存在时打印清晰中文报错（不抛 traceback）。
@@ -37,6 +40,8 @@ REQUIRED_KEYS = ("src", "tgt", "chapter", "index")
 
 # 术语命中率及格线（命中条数 / 术语表解析出的源词条数）
 MIN_HIT_RATE = 0.5
+MIN_NONEMPTY_TARGET_RATE = 0.5
+MIN_ANCHOR_MATCH_RATE = 0.8
 
 # 单个检查项最多展示的样例条数（坏行 / 未命中词条），避免刷屏
 MAX_SAMPLES = 10
@@ -56,12 +61,20 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     )
     parser.add_argument("--aligned-dir", default="data/aligned",
                         help="句对齐 JSONL 目录（默认 data/aligned，与 run_m1_pipeline.py 一致）")
-    parser.add_argument("--glossary-db", default="data/glossary/terms.sqlite3",
-                        help="术语库 sqlite 路径（默认 data/glossary/terms.sqlite3）")
+    parser.add_argument("--glossary-db", default="data/memory/mant.db",
+                        help="术语/TM 运行库 sqlite 路径（默认 data/memory/mant.db）")
     parser.add_argument("--terminology", default=None,
                         help="Markdown 术语表路径（可选；提供时检查源词在 terms 表中的命中率）")
     parser.add_argument("--min-chapters", type=int, default=3,
                         help="最少章节数（默认 3，按作品内去重后累计）")
+    parser.add_argument(
+        "--min-nonempty-target-rate", type=float, default=MIN_NONEMPTY_TARGET_RATE,
+        help="术语库非空译名率下限（默认 0.5）",
+    )
+    parser.add_argument(
+        "--min-anchor-match-rate", type=float, default=MIN_ANCHOR_MATCH_RATE,
+        help="术语锚点对齐命中率下限（默认 0.8，仅提供 --terminology 时检查）",
+    )
     return parser.parse_args(argv)
 
 
@@ -76,7 +89,9 @@ def _fail_input(msg: str) -> int:
 # ---------------------------------------------------------------------------
 
 
-def _scan_aligned(aligned_dir: Path) -> tuple[list[str], dict[str, dict[str, int]]]:
+def _scan_aligned(
+    aligned_dir: Path,
+) -> tuple[list[str], dict[str, dict[str, int]], list[dict[str, object]]]:
     """逐行扫描全部 JSONL，返回 (坏行样例列表, {作品: {章节: 句对数}})。
 
     坏行样例格式：``文件名:行号 原因``，最多保留 ``MAX_SAMPLES`` 条；
@@ -86,6 +101,7 @@ def _scan_aligned(aligned_dir: Path) -> tuple[list[str], dict[str, dict[str, int
     n_bad = 0
     # work_id -> chapter_title -> pair_count
     stats: dict[str, dict[str, int]] = {}
+    pairs: list[dict[str, object]] = []
 
     for path in sorted(aligned_dir.glob("*.jsonl")):
         work_id = path.stem
@@ -121,9 +137,10 @@ def _scan_aligned(aligned_dir: Path) -> tuple[list[str], dict[str, dict[str, int
                     continue
                 chapter = str(obj["chapter"]).strip() or "（无章节标题）"
                 chapters[chapter] = chapters.get(chapter, 0) + 1
+                pairs.append(obj)
     if n_bad > len(bad_lines):
         bad_lines.append(f"…… 其余坏行从略，共 {n_bad} 处")
-    return bad_lines, stats
+    return bad_lines, stats, pairs
 
 
 # ---------------------------------------------------------------------------
@@ -149,6 +166,23 @@ def _count_terms(conn: sqlite3.Connection) -> int | None:
 def _load_term_sources(conn: sqlite3.Connection) -> set[str]:
     """读出 terms 表全部 source 词，供命中率比对（骨架规模下全量读入足够）。"""
     return {str(r[0]) for r in conn.execute("SELECT source FROM terms")}
+
+
+def _count_nonempty_targets(conn: sqlite3.Connection) -> int:
+    """统计已有可用译名（去除纯空白）的术语条数。"""
+    return int(
+        conn.execute("SELECT COUNT(*) FROM terms WHERE TRIM(target) <> ''").fetchone()[0]
+    )
+
+
+def _count_tm_pairs(conn: sqlite3.Connection) -> int | None:
+    """统计运行库 TM 句对；表不存在返回 None。"""
+    row = conn.execute(
+        "SELECT name FROM sqlite_master WHERE type='table' AND name='tm_pairs'"
+    ).fetchone()
+    if row is None:
+        return None
+    return int(conn.execute("SELECT COUNT(*) FROM tm_pairs").fetchone()[0])
 
 
 # ---------------------------------------------------------------------------
@@ -217,6 +251,38 @@ def parse_terminology_md(md_path: Path) -> list[str]:
     return terms
 
 
+def parse_terminology_pairs(md_path: Path) -> list[tuple[str, str]]:
+    """从 Markdown 表格/列表中解析 ``(源词, 译名)``，用于对齐锚点质检。"""
+    pairs: list[tuple[str, str]] = []
+    seen: set[str] = set()
+    for line in md_path.read_text(encoding="utf-8").splitlines():
+        source = target = ""
+        if line.lstrip().startswith("|"):
+            cells = [_clean_term(c) for c in line.strip().strip("|").split("|")]
+            if len(cells) >= 2:
+                source, target = cells[0], cells[1]
+            if (
+                source in {"源词", "source", "Source"}
+                or not source
+                or all(ch in "-:" for ch in source)
+            ):
+                continue
+        else:
+            match = _MD_LIST_ITEM_RX.match(line)
+            if not match:
+                continue
+            content = match.group(1).strip()
+            for separator in _TERM_SEPARATORS:
+                if separator in content:
+                    source, target = content.split(separator, 1)
+                    source, target = _clean_term(source), _clean_term(target)
+                    break
+        if source and target and source not in seen:
+            seen.add(source)
+            pairs.append((source, target))
+    return pairs
+
+
 # ---------------------------------------------------------------------------
 # 主流程
 # ---------------------------------------------------------------------------
@@ -261,7 +327,7 @@ def main(argv: list[str] | None = None) -> int:
     ))
 
     # ---- 扫描 JSONL（供检查 2/3 使用） ----
-    bad_lines, stats = _scan_aligned(aligned_dir)
+    bad_lines, stats, aligned_pairs = _scan_aligned(aligned_dir)
     total_pairs = sum(sum(ch.values()) for ch in stats.values())
     total_chapters = sum(len(ch) for ch in stats.values())
 
@@ -306,10 +372,30 @@ def main(argv: list[str] | None = None) -> int:
             term_sources: set[str] = set()
         else:
             note = ([f"terms 表共 {n_terms} 条 -> {db_path}"]
-                    + (["（当前为 0 条：离线未开 --with-llm 时候选词可能未入库，见 data/README.md）"]
+                    + (["（当前为 0 条：请提供 terminology.md 或开启 --with-llm，见 data/README.md）"]
                        if n_terms == 0 else []))
             results.append(("术语库 terms 表总条数", True, note))
             term_sources = _load_term_sources(conn)
+            tm_pairs = _count_tm_pairs(conn)
+            results.append((
+                "运行库 TM 句对同步",
+                tm_pairs is not None and tm_pairs > 0,
+                [
+                    f"tm_pairs 表共 {tm_pairs or 0} 条；M1 对齐产物已可被 MemoryHub 检索"
+                    if tm_pairs is not None
+                    else "缺少 tm_pairs 表；请用最新 M1 管道重建运行库"
+                ],
+            ))
+            nonempty_targets = _count_nonempty_targets(conn)
+            target_rate = nonempty_targets / n_terms if n_terms else 0.0
+            results.append((
+                "术语库非空译名率",
+                target_rate >= args.min_nonempty_target_rate,
+                [
+                    f"非空译名 {nonempty_targets}/{n_terms}，比例 {target_rate:.1%}"
+                    f"（要求 >= {args.min_nonempty_target_rate:.0%}）"
+                ],
+            ))
     except sqlite3.Error as exc:
         return _fail_input(f"查询术语库失败：{db_path}（{exc}）。")
     finally:
@@ -342,6 +428,33 @@ def main(argv: list[str] | None = None) -> int:
                 more = f" 等 {len(misses)} 条" if len(misses) > MAX_SAMPLES else ""
                 detail5.append(f"  未命中词条（供人工复核）：{shown}{more}")
             results.append(("术语命中率（Markdown 源词 vs terms 表）", ok5, detail5))
+
+        # 术语是跨语言语义锚点：源句出现人工源词时，对齐译句应出现约定译名。
+        terminology_pairs = parse_terminology_pairs(md_path)
+        anchor_total = 0
+        anchor_hits = 0
+        anchor_misses: list[str] = []
+        for pair in aligned_pairs:
+            source_text = str(pair.get("src", ""))
+            target_text = str(pair.get("tgt", ""))
+            for source_term, expected_target in terminology_pairs:
+                if source_term not in source_text:
+                    continue
+                anchor_total += 1
+                if expected_target.casefold() in target_text.casefold():
+                    anchor_hits += 1
+                elif len(anchor_misses) < MAX_SAMPLES:
+                    anchor_misses.append(
+                        f"{source_term} → {expected_target}；译句摘要：{target_text[:80]}"
+                    )
+        anchor_rate = anchor_hits / anchor_total if anchor_total else 0.0
+        anchor_ok = bool(anchor_total) and anchor_rate >= args.min_anchor_match_rate
+        anchor_detail = [
+            f"命中 {anchor_hits}/{anchor_total} 个术语锚点，比例 {anchor_rate:.1%}"
+            f"（要求 >= {args.min_anchor_match_rate:.0%}）"
+        ]
+        anchor_detail.extend(f"  ! {item}" for item in anchor_misses)
+        results.append(("双语句对术语锚点一致性（自动对齐质检）", anchor_ok, anchor_detail))
 
     # ---- 汇总输出 ----
     print("=" * 60)

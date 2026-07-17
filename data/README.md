@@ -12,8 +12,19 @@ data/
       src/*.txt               # 源语言原文（默认中文）
       tgt/*.txt               # 目标语言参考译文（人工/官方译本，可选；用于句对齐与 TM）
   aligned/                    # 句对齐产物：每作品一个 <work_id>.jsonl
-  glossary/                   # 术语库 sqlite（默认 terms.sqlite3）
+  memory/mant.db              # 运行时 SQLite：术语库 + TM
+  glossary/                   # 术语审阅/导出文件
+  inputs/                     # 浏览器工作台提交的原文快照
+  exports/                    # 基线与多 Agent 成品/元数据
+  traces/                     # 每次运行的事件 JSONL + runs.db（本地监控数据源）
 ```
+
+`traces/<run_id>.jsonl` 包含可回放的 Agent 状态和 LLM 输出增量，可能含授权
+原文/译文内容；该目录已被 Git 忽略，仍需按本机敏感数据管理。事件不会记录
+Prompt 正文或 API key，常见密钥字段在写盘前还会统一脱敏。
+
+浏览器任务按 `inputs/<work>/<chapter>/<run_id>.txt` 保存输入，最终译文与元数据
+按 `exports/web/<work>/<chapter>/<run_id>.txt|json` 保存，避免同章多次运行互相覆盖。
 
 ## 原始语料放置格式
 
@@ -37,12 +48,14 @@ data/
 
 ## 术语库
 
-- 默认路径：`data/glossary/terms.sqlite3`（`scripts/run_m1_pipeline.py --glossary-db` 可改）；
+- 默认路径：`data/memory/mant.db`（与 `memory.sqlite_path` 一致，`--glossary-db` 可改）；
 - 表结构由 `mant.memory.glossary.GlossaryStore` 自动创建（`terms` 表，
   `(source, work_id)` 唯一索引，重复写入即覆盖更新），字段：
   `source / target / category / work_id / confidence / created_at`；
-- 离线（未开 `--with-llm`）运行时只统计候选词不入库；开启 LLM 复核后，
-  译法为空的候选词不会入库，避免污染翻译期的术语查询。
+- 若作品目录提供 `terminology.md`，其中的人工术语以 `confidence=1.0` 入库，
+  并清理同作品的空译名离线候选；没有人工表且未开 `--with-llm` 时，TF-IDF
+  候选可以空译名留库待复核，但 `lookup_terms` 不会把它们注入翻译 Prompt。
+- 对齐后的句对会同时写入同一 SQLite 的 `tm_pairs` 表，供 MemoryHub 直接检索。
 
 ## 版权与合规（红线，务必遵守）
 

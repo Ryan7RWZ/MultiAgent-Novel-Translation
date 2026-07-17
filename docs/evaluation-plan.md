@@ -42,7 +42,7 @@
 
 - "去术语库"：清空 `glossary` 注入并禁用 `lookup_terms`（库仍保留但不生效）。
 - "去圣经"：`get_story_bible` 返回空 `StoryBible`。
-- "去审校"：状态机跳过 reviewer 节点；"去回环"：`max_rework=0`。
+- "去审校"：状态机跳过 editor 节点；"去回环"：`max_rework=0`。
 - 每个变体跑相同测试集，与 S-full 做配对比较；所有变体共用同一 LLM 档位配置，仅开关组件。
 
 ## 4. 自动指标一：COMET

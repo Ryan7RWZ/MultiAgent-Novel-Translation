@@ -24,8 +24,11 @@ from __future__ import annotations
 
 import os
 import time
+import uuid
 from dataclasses import dataclass, field
-from typing import Any
+from typing import Any, Iterator
+
+from mant.observability import emit_event
 
 # 占位响应前缀：未配置真实模型时所有输出都带此前缀，便于下游识别"草稿"
 DRAFT_PREFIX = "[DRAFT]"
@@ -206,7 +209,7 @@ class LLMClient:
         temperature: float = 0.3,
         max_tokens: int = 4096,
     ) -> str:
-        """执行一次 chat completion，返回文本结果。
+        """执行一次 chat completion，兼容性地收集 ``stream_complete`` 全部增量。
 
         降级策略（不抛异常）：
             - 未安装 ``openai`` SDK → 返回 ``[DRAFT]`` 占位响应并记录 notes；
@@ -222,36 +225,218 @@ class LLMClient:
         返回:
             模型输出文本；降级时为 ``[DRAFT]`` 前缀的占位文本。
         """
+        return "".join(
+            self.stream_complete(
+                system,
+                user,
+                temperature=temperature,
+                max_tokens=max_tokens,
+            )
+        )
+
+    def stream_complete(
+        self,
+        system: str,
+        user: str,
+        *,
+        temperature: float = 0.3,
+        max_tokens: int = 4096,
+    ) -> Iterator[str]:
+        """执行真正的流式 chat completion，逐段产出模型文本。
+
+        ``complete`` 只是本方法的收集器，因此所有现有 Agent 无需改接口即可
+        获得底层流式传输。流式请求一旦已经产出文本就不再自动重试，避免把
+        失败尝试的半截文本与重试结果拼在一起；首 token 前失败仍按配置退避重试。
+        """
         self._last_notes = []
         cfg = self.provider
+        call_id = uuid.uuid4().hex[:12]
+        started = time.perf_counter()
+        start_prompt_tokens = self._prompt_tokens
+        start_completion_tokens = self._completion_tokens
+        emit_event(
+            "llm.started",
+            tier=self.tier,
+            payload={
+                "call_id": call_id,
+                "model": cfg.model,
+                "system_chars": len(system),
+                "user_chars": len(user),
+                "temperature": temperature,
+                "max_tokens": max_tokens,
+            },
+        )
 
         client = self._build_openai_client(cfg)
         if client is None:
-            # _build_openai_client 已把原因写入 _last_notes
-            return self._draft_response(system, user)
-
-        def _call() -> str:
-            resp = client.chat.completions.create(
-                model=cfg.model,
-                messages=[
-                    {"role": "system", "content": system},
-                    {"role": "user", "content": user},
-                ],
-                temperature=temperature,
-                max_tokens=max_tokens,
-                timeout=cfg.timeout,
+            draft = self._draft_response(system, user)
+            emit_event(
+                "llm.fallback",
+                tier=self.tier,
+                payload={"call_id": call_id, "reason": "provider_unavailable"},
             )
-            usage = getattr(resp, "usage", None)
-            if usage is not None:
-                self._prompt_tokens += getattr(usage, "prompt_tokens", 0) or 0
-                self._completion_tokens += getattr(usage, "completion_tokens", 0) or 0
-            return resp.choices[0].message.content or ""
+            emit_event(
+                "llm.token",
+                tier=self.tier,
+                payload={"call_id": call_id, "delta": draft},
+            )
+            yield draft
+            emit_event(
+                "llm.completed",
+                tier=self.tier,
+                payload={"call_id": call_id, "model": cfg.model, "fallback": True},
+                metrics={
+                    "duration_ms": round((time.perf_counter() - started) * 1000, 2),
+                    "output_chars": len(draft),
+                },
+            )
+            return
 
-        try:
-            return self._retry_with_backoff(_call, max_retries=cfg.max_retries)
-        except Exception as exc:  # noqa: BLE001 - 骨架期统一降级，不向上抛
-            self._last_notes.append(f"重试 {cfg.max_retries} 次后仍失败，降级为占位响应: {exc!r}")
-            return self._draft_response(system, user)
+        attempts = max(0, int(cfg.max_retries)) + 1
+        output_chars = 0
+        for attempt in range(attempts):
+            emitted_this_attempt = False
+            stream = None
+            try:
+                request: dict[str, Any] = {
+                    "model": cfg.model,
+                    "messages": [
+                        {"role": "system", "content": system},
+                        {"role": "user", "content": user},
+                    ],
+                    "temperature": temperature,
+                    "max_tokens": max_tokens,
+                    "timeout": cfg.timeout,
+                    "stream": True,
+                }
+                if bool(cfg.extra.get("stream_include_usage", False)):
+                    request["stream_options"] = {"include_usage": True}
+                stream = client.chat.completions.create(**request)
+                for chunk in stream:
+                    usage = getattr(chunk, "usage", None)
+                    if usage is not None:
+                        self._prompt_tokens += getattr(usage, "prompt_tokens", 0) or 0
+                        self._completion_tokens += (
+                            getattr(usage, "completion_tokens", 0) or 0
+                        )
+                    choices = getattr(chunk, "choices", None) or []
+                    if not choices:
+                        continue
+                    delta = getattr(getattr(choices[0], "delta", None), "content", None)
+                    if not delta:
+                        continue
+                    if not isinstance(delta, str):
+                        delta = str(delta)
+                    emitted_this_attempt = True
+                    output_chars += len(delta)
+                    emit_event(
+                        "llm.token",
+                        tier=self.tier,
+                        payload={"call_id": call_id, "delta": delta},
+                    )
+                    yield delta
+                emit_event(
+                    "llm.completed",
+                    tier=self.tier,
+                    payload={
+                        "call_id": call_id,
+                        "model": cfg.model,
+                        "fallback": False,
+                        "attempt": attempt + 1,
+                    },
+                    metrics={
+                        "duration_ms": round(
+                            (time.perf_counter() - started) * 1000, 2
+                        ),
+                        "output_chars": output_chars,
+                        "prompt_tokens": self._prompt_tokens - start_prompt_tokens,
+                        "completion_tokens": (
+                            self._completion_tokens - start_completion_tokens
+                        ),
+                    },
+                )
+                return
+            except Exception as exc:  # noqa: BLE001 - 统一降级，不向上抛
+                if emitted_this_attempt:
+                    note = (
+                        f"流式输出已开始后调用中断（{type(exc).__name__}），"
+                        "为避免重复文本不再自动重试。"
+                    )
+                    self._last_notes.append(note)
+                    emit_event(
+                        "llm.failed",
+                        tier=self.tier,
+                        payload={
+                            "call_id": call_id,
+                            "error": type(exc).__name__,
+                            "partial": True,
+                        },
+                        metrics={"output_chars": output_chars},
+                    )
+                    return
+                if attempt + 1 < attempts:
+                    wait = _DEFAULT_BACKOFF_BASE * (2**attempt)
+                    self._last_notes.append(
+                        f"第 {attempt + 1} 次调用失败（{type(exc).__name__}），"
+                        f"{wait:.1f}s 后重试。"
+                    )
+                    emit_event(
+                        "llm.retry",
+                        tier=self.tier,
+                        payload={
+                            "call_id": call_id,
+                            "attempt": attempt + 1,
+                            "error": type(exc).__name__,
+                            "wait_seconds": wait,
+                        },
+                    )
+                    time.sleep(wait)
+                    continue
+                self._last_notes.append(
+                    f"重试 {cfg.max_retries} 次后仍失败，降级为占位响应: {exc!r}"
+                )
+                emit_event(
+                    "llm.failed",
+                    tier=self.tier,
+                    payload={
+                        "call_id": call_id,
+                        "error": type(exc).__name__,
+                        "partial": False,
+                    },
+                )
+                draft = self._draft_response(system, user)
+                emit_event(
+                    "llm.fallback",
+                    tier=self.tier,
+                    payload={"call_id": call_id, "reason": "retries_exhausted"},
+                )
+                emit_event(
+                    "llm.token",
+                    tier=self.tier,
+                    payload={"call_id": call_id, "delta": draft},
+                )
+                yield draft
+                emit_event(
+                    "llm.completed",
+                    tier=self.tier,
+                    payload={"call_id": call_id, "model": cfg.model, "fallback": True},
+                    metrics={
+                        "duration_ms": round(
+                            (time.perf_counter() - started) * 1000, 2
+                        ),
+                        "output_chars": len(draft),
+                    },
+                )
+                return
+            finally:
+                close = getattr(stream, "close", None)
+                if callable(close):
+                    try:
+                        close()
+                    except Exception as exc:  # noqa: BLE001 - 关闭流不覆盖业务结果
+                        self._last_notes.append(
+                            f"关闭流式响应时出现 {type(exc).__name__}，已忽略。"
+                        )
 
     # ------------------------------------------------------------------
     # 内部工具
@@ -277,7 +462,12 @@ class LLMClient:
             self._last_notes.append(f"档位 {self.tier} 未配置 model，使用占位响应。")
             return None
 
-        kwargs: dict[str, Any] = {"api_key": api_key, "timeout": cfg.timeout}
+        # SDK 内建重试关闭，避免与本类的可观测退避重试叠加。
+        kwargs: dict[str, Any] = {
+            "api_key": api_key,
+            "timeout": cfg.timeout,
+            "max_retries": 0,
+        }
         if cfg.base_url:
             kwargs["base_url"] = cfg.base_url  # 接入 DeepSeek/Qwen 等兼容端点
         # TODO: 按需透传 organization / default_headers 等 extra 字段

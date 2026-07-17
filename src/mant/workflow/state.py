@@ -5,13 +5,13 @@
 字段含义与 docs/architecture.md §3.1 的状态表一一对应。
 """
 
-from typing import TypedDict
+from typing import Any, TypedDict
 
 __all__ = ["TranslationState", "init_state", "DEFAULT_MAX_REWORK"]
 
 #: 返工上限默认值；正式运行应由配置键 ``workflow.max_rework``
 #: （config/settings.example.yaml）覆盖，此处仅作骨架期兜底。
-DEFAULT_MAX_REWORK = 3
+DEFAULT_MAX_REWORK = 2
 
 
 class TranslationState(TypedDict):
@@ -32,6 +32,9 @@ class TranslationState(TypedDict):
             （状态机兼容 docs 旧称 ``"fail"``）。
         rework_count: 已实际返工次数（回退到 translate 时 +1）。
         max_rework: 返工上限，取自配置 ``workflow.max_rework``，防止死循环。
+        story_bible / tm_matches: retrieve 节点的检索结果。它们属于单次运行
+            状态，不放在 compiled graph 闭包中，因此同一图可安全并发复用。
+        runtime_notes: 各 Agent 与记忆层产生的运行说明。
     """
 
     work_id: str
@@ -45,6 +48,9 @@ class TranslationState(TypedDict):
     qa_verdict: str
     rework_count: int
     max_rework: int
+    story_bible: Any
+    tm_matches: list[dict]
+    runtime_notes: list[str]
 
 
 def init_state(
@@ -71,4 +77,7 @@ def init_state(
         qa_verdict="",
         rework_count=0,
         max_rework=int(max_rework),
+        story_bible=None,
+        tm_matches=[],
+        runtime_notes=[],
     )

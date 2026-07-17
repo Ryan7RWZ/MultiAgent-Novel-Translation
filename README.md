@@ -26,7 +26,7 @@
 
 ```text
 ┌───────────────────────────────────────────────────────────────────────────┐
-│ CLI 入口（mant.cli）：m1-pipeline / baseline / translate-chapter          │
+│ CLI 入口（mant.cli）：m1-pipeline / baseline / translate-chapter / monitor│
 └───────────────────────────────────────────────────────────────────────────┘
                                       │
                                       ▼
@@ -39,6 +39,11 @@
 ┌───────────────────────────────────────────────────────────────────────────┐
 │ 多智能体层（mant.agents）：统一经 LLMClient（fast/strong 双档）调用大模型 │
 │ 调度 │ 术语 │ 翻译 │ 审校 │ 润色 │ QA 终审                                │
+└───────────────────────────────────────────────────────────────────────────┘
+                                      │ 类型化运行事件 / LLM token 增量
+                                      ▼
+┌───────────────────────────────────────────────────────────────────────────┐
+│ 可观测层（mant.observability）：终端 │ JSONL │ SQLite │ 本地 SSE 监控页     │
 └───────────────────────────────────────────────────────────────────────────┘
                                       │
                                       ▼
@@ -73,6 +78,7 @@ MultiAgent-Novel-Translation/
 │       ├── agents/             # BaseAgent / AgentTask / AgentResult 与各角色 Agent
 │       ├── memory/             # MemoryHub 门面：术语库 / 小说圣经 / TM / FAISS
 │       ├── workflow/           # LangGraph 状态机与 TranslationState
+│       ├── observability/      # 事件总线、终端/追踪接收器与 SSE 监控页
 │       └── pipeline/           # M1 离线语料管道
 ├── tests/
 │   ├── __init__.py             # 将 src 加入 sys.path（python -m unittest 可用）
@@ -82,8 +88,8 @@ MultiAgent-Novel-Translation/
 └── README.md
 ```
 
-> 注：`mant.pipeline` / `mant.workflow` 等子包由对应负责人并行搭建，骨架阶段可能尚未出现；
-> CLI 会对缺失模块延迟导入并打印 TODO 提示，不影响其他命令使用。
+> `mant.pipeline`、`mant.baseline` 与 `mant.workflow` 均已接入正式 CLI；
+> 未配置 API key 时会以 `[DRAFT]` 模式完成端到端联调并输出人工复核标记。
 
 ## 四、快速开始
 
@@ -122,7 +128,7 @@ set OPENAI_API_KEY=sk-你的key
 - `settings.yaml` 已加入 .gitignore；**API key 只走环境变量**（由 `api_key_env` 指定变量名）；
 - 未配置 API key 时 `LLMClient` 返回 `[DRAFT]` 前缀的占位响应，流程仍可跑通。
 
-### 4.3 三个子命令
+### 4.3 四个子命令
 
 ```bash
 # M1 离线语料管道：采集 → 清洗 → 句对齐 → 术语抽取
@@ -131,11 +137,60 @@ mant m1-pipeline --config config/settings.yaml
 # M2 单 Agent 基线翻译（实验对照组）
 mant baseline --work-id demo --chapter-id 0001 --input chapter.txt
 
-# 多智能体协作翻译单章（LangGraph 状态机，QA 回环返工）
-mant translate-chapter --work-id demo --chapter-id 0001 --input chapter.txt
+# 多智能体协作翻译单章；终端实时显示每个 Agent 的 LLM 增量
+mant translate-chapter --work-id demo --chapter-id 0001 --input chapter.txt --stream --verbose
+
+# 本地 Agent 实时监控页（默认 http://127.0.0.1:8765）
+mant monitor
 ```
 
-骨架阶段子命令打印 TODO 提示；未安装也可直接运行：
+### 4.4 实时观察各 Agent
+
+Windows 可以直接双击仓库根目录的 `start_mant.bat`，它会启动浏览器翻译
+工作台。打开后可以直接粘贴原文，或把 UTF-8 `.txt` 文件拖进页面，填写作品/
+章节 ID 后点击“开始翻译”；Agent 状态、LLM 增量和最终译文都在同一页展示。
+
+仍支持把章节文件拖到批处理文件上，或显式传参后直接翻译：
+
+```bat
+start_mant.bat "data\raw\demo_work\src\0004.txt" demo_work 0004
+```
+
+批处理会优先使用 `.venv\Scripts\python.exe`，否则使用系统 `python`。若当前
+进程尚未继承 `AW4W_API_KEY`，它会从 Windows 用户变量刷新到子进程，但绝不会
+打印密钥内容。
+
+浏览器提交的输入保存到 `data/inputs/<work>/<chapter>/`，成品保存到
+`data/exports/web/<work>/<chapter>/`；这些运行数据均已被 Git 忽略。为避免重复
+计费，工作台同一时间只执行一个翻译任务。
+
+手动启动方式如下。开两个终端，先启动监控页：
+
+```bash
+mant monitor --config config/settings.yaml
+```
+
+浏览器打开 `http://127.0.0.1:8765`，再在第二个终端运行：
+
+```bash
+mant translate-chapter --config config/settings.yaml \
+  --work-id demo --chapter-id 0001 --input chapter.txt \
+  --stream --verbose
+```
+
+- `--stream`：模型响应到达一个增量就立刻打印，不等完整响应；要求 JSON 的
+  Agent 也会先实时显示原始输出，收到完成事件后才解析并更新工作流状态。
+- `--verbose`：显示 LangGraph 节点起止、LLM 重试、QA 路由与返工轮次。
+- `--trace/--no-trace`：临时覆盖追踪开关。默认按配置把事件写入
+  `data/traces/<run_id>.jsonl`，摘要写入 `data/traces/runs.db`。
+- 工作台从 JSONL 增量读取事件并通过 SSE 推送；浏览器提交任务时，后端仍调用
+  同一个正式 CLI 子进程，而不是维护第二套翻译逻辑。监控重启后也能展示最近
+  的历史事件。
+
+监控默认只监听 `127.0.0.1`。追踪中不记录 Prompt 正文或 API key；密钥字段
+还会在持久化前递归脱敏。完整事件说明见 [可观测性文档](docs/observability.md)。
+
+未安装为命令行包时，也可直接运行：
 `PYTHONPATH=src python -m mant.cli --help`（Windows CMD：`set PYTHONPATH=src`）。
 
 开发自检：
@@ -144,7 +199,7 @@ mant translate-chapter --work-id demo --chapter-id 0001 --input chapter.txt
 python -m unittest          # 测试发现（tests/ 已注入 src 路径）
 ```
 
-## 五、路线图（12 周）
+## 五、路线图
 
 | 周次    | 里程碑 | 内容 |
 | ------- | ------ | ---- |

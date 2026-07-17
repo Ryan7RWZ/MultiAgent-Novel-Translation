@@ -14,7 +14,7 @@
        - 失败/降级时 ``ok=False``，原因写入 ``notes``，不得直接抛异常中断图。
     3. ``output`` 的键由各子类在自己的 docstring 中声明，例如：
        - Translator: ``{"draft": str, "used_terms": list[str]}``
-       - Reviewer:   ``{"review_notes": list[str], "fixed_draft": str}``
+       - Editor:     ``{"review_notes": list[dict]}``
        - QA:         ``{"qa_score": float, "qa_verdict": str, "issues": list[dict]}``
        状态字段与 ``mant.workflow.state.TranslationState`` 对齐，键名变更
        需同步更新状态机。
@@ -32,9 +32,12 @@ from __future__ import annotations
 
 import json
 import re
+import time
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
+
+from mant.observability import emit_event, event_scope
 
 if TYPE_CHECKING:  # 仅类型标注，避免运行时循环依赖
     from mant.llm.client import LLMClient
@@ -173,6 +176,58 @@ class BaseAgent(ABC):
               把 LLMClient.last_notes 并入结果 notes，保证离线联调可跑通。
         """
         raise NotImplementedError
+
+    def execute(self, task: AgentTask) -> AgentResult:
+        """在统一观测边界内执行 ``run``，供工作流节点调用。
+
+        子类继续只需实现原有 ``run``；直接调用 ``run`` 的测试与外部代码保持
+        兼容。实际工作流统一走本入口，从而自动得到 Agent 起止、耗时、轮次、
+        segment 和模型档位事件。
+        """
+        tier = str(getattr(self, "tier", "") or getattr(self.llm, "tier", ""))
+        round_no = int(task.context.get("round", 0) or 0)
+        started = time.perf_counter()
+        with event_scope(
+            agent=self.name,
+            segment_id=task.segment_id,
+            round=round_no,
+            tier=tier,
+        ):
+            emit_event(
+                "agent.started",
+                payload={
+                    "input_chars": len(task.source_text),
+                    "context_keys": sorted(task.context),
+                },
+            )
+            try:
+                result = self.run(task)
+            except Exception as exc:  # noqa: BLE001 - Agent 边界统一隔离故障
+                emit_event(
+                    "agent.failed",
+                    payload={"error": type(exc).__name__},
+                    metrics={
+                        "duration_ms": round(
+                            (time.perf_counter() - started) * 1000, 2
+                        )
+                    },
+                )
+                return self._result(
+                    ok=False,
+                    notes=[f"Agent 未捕获异常已由执行边界隔离：{exc!r}"],
+                )
+            emit_event(
+                "agent.completed",
+                payload={
+                    "ok": result.ok,
+                    "output_keys": sorted(result.output),
+                    "note_count": len(result.notes),
+                },
+                metrics={
+                    "duration_ms": round((time.perf_counter() - started) * 1000, 2)
+                },
+            )
+            return result
 
     # ------------------------------------------------------------------
     # 公共辅助

@@ -234,9 +234,17 @@ class QAAgent(BaseAgent):
         detail = _extract_qa_detail(parsed)
         if detail is None:
             notes.append("QA 评分结构不符合 schema，安全默认判 rework")
+            fallback_detail = {
+                "verdict": "rework",
+                "suggestions": ["QA 输出无法解析；请重新核对原文忠实度、术语与语言流畅度。"],
+            }
             return self._result(
                 ok=False,
-                output={"qa_score": 0.0, "qa_verdict": "rework", "qa_detail": {}},
+                output={
+                    "qa_score": 0.0,
+                    "qa_verdict": "rework",
+                    "qa_detail": fallback_detail,
+                },
                 notes=notes,
             )
 

@@ -35,10 +35,10 @@ class BaseAgent(ABC):
 | context 键 | 内容 | 主要消费方 |
 | --- | --- | --- |
 | `glossary` | `dict[str, str]` 本章术语映射 | 翻译 / 审校 / QA |
-| `tm_hits` | `list[dict]`，`search_tm` 结果序列化 | 翻译 |
-| `bible` | `StoryBible` 摘要字典 | 翻译 / 审校 / QA |
+| `tm_matches` | `list[dict]`，`search_tm` 结果序列化 | 翻译 |
+| `story_bible` | `StoryBible` 摘要字典 | 翻译 / 审校 / QA |
 | `review_notes` | `list[str]` 审校+QA 批注 | 翻译（返工轮） |
-| `prev_segments` | 相邻已译段落（衔接用） | 翻译 / 润色 |
+| `prev_summary` | 上一章/相邻段摘要（衔接用） | 翻译 |
 | `round` | 当前返工轮次（0 起） | 全部 |
 
 ## 2. 输出契约总表（`AgentResult.output` 键 → `TranslationState` 字段）
@@ -50,12 +50,12 @@ class BaseAgent(ABC):
 | 调度 Agent | `orchestrator` | `plan: list[dict]`、`dispatch: dict` | （控制层，不入 state） | fast（或纯规则） |
 | 术语 Agent | `terminologist` | `glossary: dict[str, str]`、`new_terms: list[dict]` | `glossary` | fast |
 | 翻译 Agent | `translator` | `draft: str` | `draft` | strong |
-| 审校 Agent | `reviewer` | `draft: str`、`review_notes: list[str]` | `draft`、`review_notes` | strong |
+| 审校 Agent | `editor` | `review_notes: list[dict]` | `review_notes` | strong |
 | 润色 Agent | `polisher` | `polished: str` | `polished` | strong |
-| QA 终审 | `qa` | `qa_score: float`、`qa_verdict: str`、`qa_notes: list[str]` | `qa_score`、`qa_verdict`、并入 `review_notes` | strong |
+| QA 终审 | `qa` | `qa_score: float`、`qa_verdict: str`、`qa_detail: dict` | `qa_score`、`qa_verdict`、建议并入 `review_notes` | strong |
 
 `new_terms` 元素结构对齐 `TermEntry`：`{"source", "target", "category", "work_id", "confidence"}`。
-`qa_verdict` 取值仅 `"pass"` / `"fail"`；`qa_score` 为 0–100。
+`qa_verdict` 取值仅 `"pass"` / `"rework"`；`qa_score` 为 0–10。
 
 ## 3. 各 Agent 详设
 
@@ -82,7 +82,7 @@ class BaseAgent(ABC):
 ### 3.3 翻译 Agent（translator）
 
 - **职责**：产出初译 `draft`；返工轮需携带 `review_notes` 批注做约束重译。
-- **输入**：`source_text`（当前段或若干段），`context.glossary / tm_hits / bible / prev_segments / review_notes / round`。
+- **输入**：`source_text`（当前段或若干段），`context.glossary / tm_matches / story_bible / prev_summary / review_notes / round`。
 - **输出**：`draft`。
 - **Prompt 设计要点**：
   - system 设定角色："资深网络小说译者，熟悉中文网文类型学（修仙/玄幻/都市等）与目标语读者习惯"；
@@ -91,11 +91,11 @@ class BaseAgent(ABC):
   - 明确禁区：不增删情节、不改变 POV 与时态、术语表外专名音译并保持全书一致。
 - **分档建议**：strong。初译质量决定后续环节负担，是成本最不该省的位置。
 
-### 3.4 审校 Agent（reviewer）
+### 3.4 审校 Agent（editor）
 
-- **职责**：对照原文逐段审校 `draft`，**原地修订**并产出批注；只管"对不对"，不管"美不美"（风格留给润色）。
+- **职责**：对照原文逐段审校 `draft`，产出结构化问题清单；只管"对不对"，不直接改稿，修改由后续润色/返工执行。
 - **输入**：`source_text` = 原文段，`context` 携带 `draft`（从 state 注入）、`glossary`、`bible`。
-- **输出**：`draft`（修订后译稿）、`review_notes`（每条含位置/类型/说明，字符串化）。
+- **输出**：`review_notes`（每条含严重度、类型、位置与修改建议）。
 - **检查清单（写入 Prompt）**：误译、漏译、增译；术语与 glossary 不一致；专名拼写前后不一；数字、方位、辈分、境界等级错误；事实与 bible 冲突。
 - **Prompt 设计要点**：要求先逐条核对清单再修订；批注用固定格式 `[类型] 位置说明：问题 → 建议`；无问题时返回原稿 + 空 notes；禁止做风格性改写。
 
@@ -109,19 +109,19 @@ class BaseAgent(ABC):
 
 ### 3.6 QA 终审 Agent（qa）
 
-- **职责**：对 `polished` 独立终审，给出 `qa_score`（0–100）与 `qa_verdict`；fail 时产出可执行的结构化批注驱动回退返工。
+- **职责**：对 `polished` 终审，给出 `qa_score`（0–10）与 `qa_verdict`；rework 时产出可执行的结构化批注驱动回退返工。
 - **输入**：`context` 携带原文、`polished`、`glossary`、`bible`。
-- **输出**：`qa_score`、`qa_verdict`、`qa_notes`（并入 `review_notes` 供下一轮翻译使用）。
+- **输出**：`qa_score`、`qa_verdict`、`qa_detail.suggestions`（并入 `review_notes` 供下一轮翻译使用）。
 - **评分量规（rubric，写入 Prompt）**：
 
   | 维度 | 权重 | 要点 |
   | --- | --- | --- |
   | 准确性 | 40 | 误译/漏译/增译，出现 critical 错误直接 fail |
-  | 术语一致性 | 20 | 与 glossary/bible 的一致性 |
-  | 流畅性 | 25 | 语法、搭配、可读性 |
-  | 风格贴合 | 15 | 文体、语域、网文类型感 |
+  | 流畅性 | 20 | 语法、搭配、可读性 |
+  | 术语一致性 | 20 | 与 glossary/story_bible 的一致性 |
+  | 风格贴合 | 20 | 文体、语域、网文类型感 |
 
-  通过线建议：`qa_score ≥ 85` 且无 critical 错误 → `pass`（阈值在 M5 评测期调参）。
+  当前通过线：`qa_score ≥ 7.0` 且四维均不低于 6.0 → `pass`。
 - **Prompt 设计要点**：先按维度打分再给总评；批注格式与审校一致以便翻译节点统一消费；温度取 0 附近保证判决稳定；**防共谋**：QA 不查看其他 Agent 的 notes，独立判决。
 - **分档建议**：strong。QA 是回环的闸门，误判（过松/过严）直接决定质量与成本。
 
@@ -133,6 +133,11 @@ class BaseAgent(ABC):
 | fast | 结构化抽取、轻量判断、批量预处理 | 术语、调度（可选）、M1 管道批量术语初筛、QA 预审（可选） | 输出空间小、可校验、调用量大 |
 
 `LLMClient.from_config(cfg)` 读取 `llm.providers.*` 中 fast/strong 两档配置；各 Agent 在构造时按上表选档，档位可通过配置覆盖以便消融实验。
+
+工作流不直接调用 `agent.run(task)`，而统一调用 `agent.execute(task)`。
+`execute` 保留原有结果契约，同时自动发射 `agent.started/completed/failed`，并把
+agent、segment、round、tier 写入当前运行上下文。Agent 内部仍调用兼容的
+`LLMClient.complete`；其底层由 `stream_complete` 实时发射 `llm.token`。
 
 ## 5. 成本估算思路
 

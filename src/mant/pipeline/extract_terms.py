@@ -23,6 +23,7 @@ import math
 import re
 from collections import Counter
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any, Iterable, Protocol, runtime_checkable
 
 from mant.memory.models import TermEntry  # 统一数据契约（stdlib dataclass）
@@ -36,6 +37,7 @@ __all__ = [
     "char_ngrams",
     "extract_terms_for_work",
     "llm_review_candidates",
+    "load_manual_terminology",
     "offline_fallback_entries",
     "save_terms",
     "tfidf_candidates",
@@ -74,6 +76,46 @@ class TermStoreLike(Protocol):
     def upsert(self, entries: Iterable[TermEntry]) -> int:
         """批量写入术语条目，返回写入条数。"""
         ...
+
+
+def load_manual_terminology(path: str | Path, work_id: str) -> list[TermEntry]:
+    """读取人工维护的 Markdown 术语表，返回高置信度 ``TermEntry``。
+
+    支持 ``| 源词 | 译法 | 类别 |`` 表格。人工术语在离线候选之后 upsert，
+    因而能够为同名空译法候选补全目标译名，作为翻译期可直接使用的资产。
+    """
+    md_path = Path(path)
+    if not md_path.is_file():
+        return []
+    entries: list[TermEntry] = []
+    seen: set[str] = set()
+    for line in md_path.read_text(encoding="utf-8").splitlines():
+        if not line.lstrip().startswith("|"):
+            continue
+        cells = [cell.strip() for cell in line.strip().strip("|").split("|")]
+        if len(cells) < 2:
+            continue
+        source, target = cells[0], cells[1]
+        if (
+            not source
+            or not target
+            or source in {"源词", "source", "Source"}
+            or all(ch in "-:" for ch in source)
+        ):
+            continue
+        if source in seen:
+            continue
+        seen.add(source)
+        entries.append(
+            TermEntry(
+                source=source,
+                target=target,
+                category=cells[2] if len(cells) > 2 else "manual",
+                work_id=work_id,
+                confidence=1.0,
+            )
+        )
+    return entries
 
 
 # ---------------------------------------------------------------------------

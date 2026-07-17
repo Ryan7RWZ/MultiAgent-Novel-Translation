@@ -89,6 +89,21 @@ class TestGlossaryStore(unittest.TestCase):
         self.assertAlmostEqual(hits["剑气"].confidence, 0.95)
         self.assertEqual(other, {})  # 术语按作品隔离，跨作品不可见
 
+    def test_lookup_excludes_empty_unreviewed_targets(self) -> None:
+        """空译名候选可留库待复核，但不能注入翻译 Prompt。"""
+        self.store.upsert([
+            self._entry(source="候选词", target="", category="offline", confidence=0.5)
+        ])
+        self.assertEqual(self.store.lookup(["候选词"], "w_demo"), {})
+
+    def test_match_text_returns_only_present_usable_terms(self) -> None:
+        self.store.upsert([
+            self._entry(source="青玄宗", target="Azure Profound Sect"),
+            self._entry(source="空候选", target="", category="offline"),
+        ])
+        hits = self.store.match_text("他拜入青玄宗。", "w_demo")
+        self.assertEqual(set(hits), {"青玄宗"})
+
 
 if __name__ == "__main__":
     unittest.main()

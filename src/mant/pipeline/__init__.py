@@ -30,6 +30,7 @@ from .align import (
     SentencePair,
     align_documents,
     align_sentences,
+    estimate_char_ratio,
     pair_chapters,
     parse_chapter_number,
     read_jsonl,
@@ -43,8 +44,10 @@ from .extract_terms import (
     build_term_entries,
     extract_terms_for_work,
     llm_review_candidates,
+    load_manual_terminology,
     tfidf_candidates,
 )
+from .runner import run_pipeline
 
 __all__ = [
     # collect
@@ -67,6 +70,7 @@ __all__ = [
     "SentencePair",
     "align_documents",
     "align_sentences",
+    "estimate_char_ratio",
     "pair_chapters",
     "parse_chapter_number",
     "read_jsonl",
@@ -79,5 +83,7 @@ __all__ = [
     "build_term_entries",
     "extract_terms_for_work",
     "llm_review_candidates",
+    "load_manual_terminology",
     "tfidf_candidates",
+    "run_pipeline",
 ]

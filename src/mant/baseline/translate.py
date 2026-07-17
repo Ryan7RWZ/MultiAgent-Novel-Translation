@@ -131,6 +131,10 @@ class BaselineTranslator:
         """
         chapter_path = Path(chapter_path)
         text = chapter_path.read_text(encoding="utf-8")
+        # 与 M1/多智能体主流程统一基础清洗，避免广告行进入模型与实验结果。
+        from mant.pipeline.clean import clean_text
+
+        text = clean_text(text)
         segments = self.split_segments(text)
 
         # 注入统计：术语/TM 命中总量、有注入的段数、降级计数

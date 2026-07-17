@@ -117,10 +117,25 @@ class GlossaryStore:
         placeholders = ",".join("?" for _ in uniq_terms)
         rows = self._conn.execute(
             f"SELECT source, target, category, work_id, confidence "
-            f"FROM terms WHERE work_id = ? AND source IN ({placeholders})",
+            f"FROM terms WHERE work_id = ? AND TRIM(target) <> '' "
+            f"AND source IN ({placeholders})",
             [work_id, *uniq_terms],
         ).fetchall()
         return {row["source"]: self._row_to_entry(row) for row in rows}
+
+    def delete_empty_offline(self, work_id: str) -> int:
+        """删除指定作品中没有译名的离线候选，返回删除条数。
+
+        人工术语表就位后，这些候选不应继续被统计为可用术语；需要保留候选
+        做人工复核时，应在导入可信术语前另行导出。
+        """
+        cursor = self._conn.execute(
+            "DELETE FROM terms WHERE work_id = ? AND category = 'offline' "
+            "AND TRIM(target) = ''",
+            (work_id,),
+        )
+        self._conn.commit()
+        return max(0, int(cursor.rowcount))
 
     def list_by_work(self, work_id: str) -> list[TermEntry]:
         """列出指定作品下的全部术语（按 source 排序，便于导出审阅）。"""
@@ -130,6 +145,14 @@ class GlossaryStore:
             (work_id,),
         ).fetchall()
         return [self._row_to_entry(row) for row in rows]
+
+    def match_text(self, source_text: str, work_id: str) -> dict[str, TermEntry]:
+        """返回源文本中实际出现且已有非空译名的术语。"""
+        return {
+            entry.source: entry
+            for entry in self.list_by_work(work_id)
+            if entry.target.strip() and entry.source in source_text
+        }
 
     def close(self) -> None:
         """关闭底层 sqlite 连接。"""

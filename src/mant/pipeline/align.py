@@ -29,6 +29,7 @@ __all__ = [
     "align_documents",
     "align_sentences",
     "align_with_vecalign",
+    "estimate_char_ratio",
     "pair_chapters",
     "parse_chapter_number",
     "read_jsonl",
@@ -228,11 +229,30 @@ def _move_cost(
     return cost
 
 
+def estimate_char_ratio(
+    src_sents: list[str],
+    tgt_sents: list[str],
+    *,
+    minimum: float = 0.5,
+    maximum: float = 8.0,
+) -> float:
+    """按当前章节两侧总字符数估算目标/源长度比。
+
+    固定的中英字符比会随标点、专名和文本风格大幅波动。章节级估算能在
+    不依赖语义模型的前提下避免系统性错位；上下限用于隔离异常空文本。
+    """
+    src_len = sum(len(s) for s in src_sents)
+    tgt_len = sum(len(s) for s in tgt_sents)
+    if src_len <= 0 or tgt_len <= 0:
+        return 1.0
+    return max(minimum, min(maximum, tgt_len / src_len))
+
+
 def align_sentences(
     src_sents: list[str],
     tgt_sents: list[str],
     *,
-    char_ratio: float = 1.6,
+    char_ratio: float | None = None,
     gap_penalty: float = 0.6,
     group_penalty: float = 0.15,
 ) -> list[tuple[str, str]]:
@@ -240,7 +260,8 @@ def align_sentences(
 
     参数:
         src_sents / tgt_sents: 源 / 目标语言句子列表。
-        char_ratio: 期望"目标侧字符数 / 源侧字符数"比例，中→英经验值约 1.6。
+        char_ratio: 期望"目标侧字符数 / 源侧字符数"比例；``None`` 时按
+            当前章节两侧总字符数自动估算，避免固定经验值造成系统性错位。
         gap_penalty: 单句删除/插入的固定代价。
         group_penalty: 2-1 / 1-2 合并对齐的附加代价。
 
@@ -253,6 +274,11 @@ def align_sentences(
     n, m = len(src_sents), len(tgt_sents)
     if n == 0 or m == 0:
         return []
+    effective_ratio = (
+        estimate_char_ratio(src_sents, tgt_sents)
+        if char_ratio is None
+        else max(float(char_ratio), 0.01)
+    )
 
     inf = float("inf")
     # dp[i][j] = 对齐完前 i 句源文、前 j 句译文的最小总代价
@@ -271,7 +297,7 @@ def align_sentences(
                     continue
                 cost = dp[i][j] + _move_cost(
                     src_sents, i, di, tgt_sents, j, dj,
-                    char_ratio, gap_penalty, group_penalty,
+                    effective_ratio, gap_penalty, group_penalty,
                 )
                 if cost < dp[ni][nj]:
                     dp[ni][nj] = cost
@@ -307,7 +333,7 @@ def align_documents(
     src_lang: str = "zh",
     tgt_lang: str = "en",
     chapter_pattern: str | None = None,
-    char_ratio: float = 1.6,
+    char_ratio: float | None = None,
 ) -> list[SentencePair]:
     """文档级对齐编排：切章 → 章节配对 → 逐章句对齐。
 
@@ -315,7 +341,7 @@ def align_documents(
         src_text / tgt_text: 已清洗的源 / 目标语言全文。
         src_lang / tgt_lang: 语言代码（决定切句标点集合）。
         chapter_pattern: 自定义章节标题正则（双语共用，见 clean.split_chapters）。
-        char_ratio: 期望字符数比例（见 align_sentences）。
+        char_ratio: 期望字符数比例；默认按每章自动估算（见 align_sentences）。
 
     返回:
         ``SentencePair`` 列表；未配对成功的源章节被跳过（tgt=None）。

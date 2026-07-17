@@ -104,6 +104,18 @@ TODO: 补 2–3 组网文风格 few-shot（境界名、法宝名）。"""
         notes: list[str] = []
         target_lang = str(task.context.get("target_lang", "English"))
 
+        # 0) 确定性命中已有术语。此路径不依赖 LLM，保证离线/无 key 模式下
+        # M1 沉淀的人工术语仍能进入本章 glossary。
+        known: dict[str, TermEntry] = {}
+        if self.memory is not None and hasattr(self.memory, "match_terms"):
+            try:
+                known = self.memory.match_terms(task.source_text, task.work_id)
+            except Exception as exc:  # noqa: BLE001
+                notes.append(f"match_terms 调用失败，跳过已有术语全文匹配：{exc!r}")
+        glossary: dict[str, str] = {
+            source: entry.target for source, entry in known.items() if entry.target
+        }
+
         # 1) LLM 抽取候选术语（JSON 数组；[DRAFT] 占位时走降级路径）
         resp = self.complete(
             self.build_user_prompt(
@@ -119,14 +131,17 @@ TODO: 补 2–3 组网文风格 few-shot（境界名、法宝名）。"""
         candidates = self._parse_candidates(parsed, task.work_id, notes)
 
         if not candidates:
-            # 占位响应 / 解析失败 / 确实无新术语：降级走完流程，产物为空映射
-            notes.append("本轮未获得候选术语（占位响应或解析失败时的降级路径）。")
+            # 占位响应 / 解析失败 / 确实无新术语：仍返回确定性命中的已有术语。
+            notes.append(
+                f"本轮未获得新术语候选；已从术语库直接命中 {len(glossary)} 条。"
+            )
             return self._result(
-                ok=False, output={"glossary": {}, "new_terms": []}, notes=notes
+                ok=bool(glossary),
+                output={"glossary": glossary, "new_terms": []},
+                notes=notes,
             )
 
         # 2) 与库内条目比对（先入库者为准）
-        glossary: dict[str, str] = {}
         new_terms: list[TermEntry] = []
         arbitration: list[str] = []
         existing: dict[str, TermEntry] = {}
@@ -135,6 +150,7 @@ TODO: 补 2–3 组网文风格 few-shot（境界名、法宝名）。"""
                 existing = self.memory.lookup_terms(
                     [c.source for c in candidates], task.work_id
                 )
+                existing.update(known)
             except Exception as exc:  # noqa: BLE001 —— 记忆层故障不阻断主流程
                 notes.append(f"lookup_terms 调用失败，跳过库内比对：{exc!r}")
         else:
