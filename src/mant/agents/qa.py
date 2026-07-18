@@ -120,8 +120,14 @@ class QAAgent(BaseAgent):
     tier: str = "strong"
     #: 采样温度：评分要求低发散、可复现
     temperature: float = 0.1
-    #: 单次补全最大 token 数（JSON 输出较短）
-    max_tokens: int = 2048
+    #: 单次补全最大 token 数；schema 很小，限制冗长推理与失控输出。
+    max_tokens: int = 768
+    #: 请求 OpenAI 兼容端点启用 JSON object 模式；可由角色配置关闭。
+    structured_json: bool = True
+    #: 首次 JSON 无效时，只做一次短修复，避免反复产生高额调用。
+    repair_attempts: int = 1
+    repair_max_tokens: int = 384
+    thinking: str | None = None
 
     #: 四维权重（和为 1.0）：忠实度权重最高
     DIMENSION_WEIGHTS: dict[str, float] = {
@@ -152,7 +158,8 @@ class QAAgent(BaseAgent):
 - 判 "rework" 时必须给出具体、可执行的返工建议（指出问题位置与修改方向）。
 
 【输出要求】
-只输出 JSON，不要输出任何其他文字、解释或代码块标记。格式如下：
+只输出一个紧凑 JSON 对象，不要解释、复述原文、输出代码块或思考过程。
+suggestions 最多 3 条，每条不超过 120 个汉字。格式如下：
 {
   "accuracy": 8.0,
   "fluency": 8.5,
@@ -161,6 +168,9 @@ class QAAgent(BaseAgent):
   "verdict": "pass",
   "suggestions": ["返工建议（中文，逐条具体可执行）；判 pass 时可为空数组"]
 }"""
+
+    JSON_REPAIR_SYSTEM_PROMPT: str = """你是 JSON 修复器。只输出一个合法、紧凑的 JSON 对象。
+保留输入中的四项分数、verdict 和 suggestions；禁止解释、补写分析或使用代码块。"""
 
     #: 用户提示词模板：{source_text} 原文 / {polished} 待终审译文 /
     #: {glossary} 术语表 / {review_notes} 审校意见
@@ -218,6 +228,10 @@ class QAAgent(BaseAgent):
                 user,
                 temperature=self.temperature,
                 max_tokens=self.max_tokens,
+                response_format=(
+                    {"type": "json_object"} if self.structured_json else None
+                ),
+                thinking=self.thinking,
             )
         except Exception as exc:  # noqa: BLE001 —— 骨架期统一降级，不向上抛
             notes.append(f"LLM 调用失败：{exc!r}")
@@ -231,6 +245,34 @@ class QAAgent(BaseAgent):
 
         # 4) 解析 JSON 输出；parse_json_output 失败时返回 None 并自动记录 notes
         parsed = self.parse_json_output(raw, notes)
+        if parsed is None and not raw.lstrip().startswith("[DRAFT]"):
+            for attempt in range(max(0, int(self.repair_attempts))):
+                repair_user = (
+                    "将以下内容修复为要求的 QA JSON。只保留 accuracy、fluency、"
+                    "terminology、style、verdict、suggestions 六个字段：\n"
+                    + raw[-6000:]
+                )
+                try:
+                    repaired = self.llm.complete(
+                        self.JSON_REPAIR_SYSTEM_PROMPT,
+                        repair_user,
+                        temperature=0.0,
+                        max_tokens=max(64, int(self.repair_max_tokens)),
+                        response_format=(
+                            {"type": "json_object"}
+                            if self.structured_json
+                            else None
+                        ),
+                        thinking=self.thinking,
+                    )
+                except Exception as exc:  # noqa: BLE001 - 修复失败仍安全判返工
+                    notes.append(f"QA JSON 第 {attempt + 1} 次修复调用失败：{exc!r}")
+                    break
+                notes.extend(self.llm.last_notes)
+                parsed = self.parse_json_output(repaired, notes)
+                if parsed is not None:
+                    notes.append(f"QA JSON 已在第 {attempt + 1} 次短修复后恢复")
+                    break
         detail = _extract_qa_detail(parsed)
         if detail is None:
             notes.append("QA 评分结构不符合 schema，安全默认判 rework")
@@ -271,6 +313,9 @@ class QAAgent(BaseAgent):
         if verdict == "rework" and not detail.get("suggestions"):
             detail["suggestions"] = ["（模型未给出具体返工建议，请人工复核）"]
             notes.append("判 rework 但模型未提供返工建议，已填占位建议")
+        detail["suggestions"] = [
+            str(item)[:120] for item in (detail.get("suggestions") or [])[:3]
+        ]
 
         # TODO: qa_score / qa_detail 写入实验日志，供 M2 单 Agent 基线对照分析
         return self._result(

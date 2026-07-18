@@ -20,6 +20,7 @@ class TranslationState(TypedDict):
     字段:
         work_id: 作品 ID（贯穿记忆层：术语库 / TM / 小说圣经的命名空间）。
         chapter_id: 章节 ID（一般为文件名或章节号）。
+        run_id: 运行标识；checkpoint 恢复时必须沿用同一个值。
         source_text: 安全规范化后的完整原文。所有章级 Agent 使用该字段，避免
             重新拼接片段时增删空白。
         segments: 调度 Agent 切分后的原文片段列表，按序翻译；入口写入后不变。
@@ -34,6 +35,9 @@ class TranslationState(TypedDict):
         segment_failures: 各阶段按 segment 记录的失败/完整性告警；存在任一
             条目时章级 QA 不得放行。
         segment_qa: 每个 segment 的 QA 分数、裁决与明细，章级结果由代码归并。
+        rework_segment_indices: QA 或完整性检查标记的定点返工片段序号。
+        execution_stats: 本次运行累计的派发、失败、拒绝和 checkpoint 统计。
+        qa_summary: QA 的实际评估覆盖率、已评估片通过率与技术失败分类。
         qa_score: QA 终审质量分（由 QAAgent 按维度权重确定性计算）。
         qa_verdict: QA 终审结论：``"pass"`` 放行 / ``"rework"`` 返工
             （状态机兼容 docs 旧称 ``"fail"``）。
@@ -46,6 +50,7 @@ class TranslationState(TypedDict):
 
     work_id: str
     chapter_id: str
+    run_id: str
     source_text: str
     segments: list[str]
     segment_meta: list[dict]
@@ -58,6 +63,9 @@ class TranslationState(TypedDict):
     polished: str
     segment_failures: list[dict[str, Any]]
     segment_qa: list[dict[str, Any]]
+    rework_segment_indices: list[int]
+    execution_stats: dict[str, Any]
+    qa_summary: dict[str, Any]
     qa_score: float
     qa_verdict: str
     rework_count: int
@@ -76,6 +84,7 @@ def init_state(
     source_text: str | None = None,
     segment_meta: list[dict] | None = None,
     segmentation_stats: dict[str, Any] | None = None,
+    run_id: str = "",
 ) -> TranslationState:
     """构造初始状态的便捷工厂（骨架）。
 
@@ -85,6 +94,7 @@ def init_state(
     return TranslationState(
         work_id=work_id,
         chapter_id=chapter_id,
+        run_id=str(run_id),
         source_text="".join(segments) if source_text is None else str(source_text),
         segments=list(segments),
         segment_meta=list(segment_meta or []),
@@ -97,6 +107,9 @@ def init_state(
         polished="",
         segment_failures=[],
         segment_qa=[],
+        rework_segment_indices=[],
+        execution_stats={},
+        qa_summary={},
         qa_score=0.0,
         qa_verdict="",
         rework_count=0,

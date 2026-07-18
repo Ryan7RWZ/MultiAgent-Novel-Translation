@@ -27,6 +27,7 @@ import time
 import uuid
 from dataclasses import dataclass, field
 from typing import Any, Iterator
+from urllib.parse import urlsplit, urlunsplit
 
 from mant.observability import emit_event
 
@@ -72,6 +73,27 @@ class ProviderConfig:
             if key:
                 return key
         return self.api_key
+
+    def semantic_config(self) -> dict[str, Any]:
+        """返回影响模型输出、但不包含密钥值的可持久化配置。"""
+        safe_base_url = ""
+        if self.base_url:
+            parsed = urlsplit(self.base_url)
+            host = parsed.hostname or ""
+            if parsed.port:
+                host = f"{host}:{parsed.port}"
+            safe_base_url = urlunsplit((parsed.scheme, host, parsed.path, "", ""))
+        return {
+            "model": self.model,
+            "base_url": safe_base_url,
+            "api_key_env": self.api_key_env or "",
+            "timeout": float(self.timeout),
+            "max_retries": int(self.max_retries),
+            "partial_retries": int(self.extra.get("partial_retries", 1) or 0),
+            "stream_include_usage": bool(
+                self.extra.get("stream_include_usage", False)
+            ),
+        }
 
 
 class LLMClient:
@@ -171,6 +193,21 @@ class LLMClient:
         """当前档位的模型名。"""
         return self.provider.model
 
+    def semantic_config(self, *, include_all_tiers: bool = False) -> dict[str, Any]:
+        """返回 checkpoint/manifest 使用的脱敏模型语义配置。"""
+        if include_all_tiers:
+            providers = {
+                name: provider.semantic_config()
+                for name, provider in sorted(self._providers.items())
+            }
+        else:
+            providers = {self.tier: self.provider.semantic_config()}
+        return {
+            "tier": self.tier,
+            "default_tier": self.default_tier,
+            "providers": providers,
+        }
+
     @property
     def total_prompt_tokens(self) -> int:
         """累计 prompt token 数。"""
@@ -215,6 +252,8 @@ class LLMClient:
         *,
         temperature: float = 0.3,
         max_tokens: int = 4096,
+        response_format: dict[str, Any] | None = None,
+        thinking: str | None = None,
     ) -> str:
         """执行一次 chat completion，兼容性地收集 ``stream_complete`` 全部增量。
 
@@ -247,6 +286,8 @@ class LLMClient:
                     user,
                     temperature=temperature,
                     max_tokens=max_tokens,
+                    response_format=response_format,
+                    thinking=thinking,
                 )
             )
             accumulated_notes.extend(self._last_notes)
@@ -281,6 +322,8 @@ class LLMClient:
         *,
         temperature: float = 0.3,
         max_tokens: int = 4096,
+        response_format: dict[str, Any] | None = None,
+        thinking: str | None = None,
     ) -> Iterator[str]:
         """执行真正的流式 chat completion，逐段产出模型文本。
 
@@ -291,6 +334,8 @@ class LLMClient:
         """
         self._last_notes = []
         self._last_call_incomplete = False
+        if thinking not in {None, "", "enabled", "disabled"}:
+            raise ValueError("thinking 只能为 enabled、disabled 或 None")
         cfg = self.provider
         call_id = uuid.uuid4().hex[:12]
         self._last_call_id = call_id
@@ -307,6 +352,8 @@ class LLMClient:
                 "user_chars": len(user),
                 "temperature": temperature,
                 "max_tokens": max_tokens,
+                "response_format": str(response_format or ""),
+                "thinking": thinking or "provider_default",
             },
         )
 
@@ -353,6 +400,10 @@ class LLMClient:
                     "timeout": cfg.timeout,
                     "stream": True,
                 }
+                if response_format:
+                    request["response_format"] = dict(response_format)
+                if thinking:
+                    request["extra_body"] = {"thinking": {"type": thinking}}
                 if bool(cfg.extra.get("stream_include_usage", False)):
                     request["stream_options"] = {"include_usage": True}
                 stream = client.chat.completions.create(**request)

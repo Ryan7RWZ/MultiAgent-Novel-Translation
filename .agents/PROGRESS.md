@@ -1,10 +1,10 @@
 # MANT 项目交接与当前进度
 
-> 快照日期：2026-07-18（Asia/Shanghai）
+> 快照日期：2026-07-19（Asia/Shanghai）
 >
-> 分支：`main`，与 `origin/main` 同步
+> 分支：`agent/harden-concurrent-translation`，基于 `origin/main`
 >
-> 状态：核心 M1、章节多 Agent 链路、流式事件、实时监控和浏览器输入工作台已经合入 `main`；真实供应商的 CLI 与浏览器 API 最小端到端链路已在本机验收通过。当前工作区新增了无 LLM 的确定性初始切片、逐片下游处理及输出完整性保护，尚未提交。
+> 状态：核心 M1、章节多 Agent 链路、流式事件、实时监控和浏览器输入工作台已经合入 `main`；本分支包含并发执行、checkpoint/manifest、定点恢复、结构化输出加固及其测试。真实 DeepSeek 20 片、全局 4 并发链路已跑通并暴露两个尚未修复的质量/输出预算问题。
 
 ## 1. 项目目标
 
@@ -84,8 +84,8 @@ MultiAgent-Novel-Translation/
 │  ├─ pipeline/                 # 采集、清洗、对齐、术语提取和统一 runner
 │  ├─ segmentation.py           # 结构优先、token 预算约束的确定性初始切片
 │  ├─ workflow/                 # TranslationState 与 LangGraph 章节工作流
-│  └─ cli.py                    # m1-pipeline/baseline/translate-chapter/monitor
-└─ tests/                       # 31 个离线测试，覆盖切片、记忆、流程、返工、事件和质量规则
+│  └─ cli.py                    # m1-pipeline/baseline/translate-chapter/resume-run/monitor
+└─ tests/                       # 54 项 pytest / 40 项 unittest，覆盖切片、记忆、流程、返工、事件和质量规则
 ```
 
 `data/` 中的运行内容默认被忽略；目录中现有 M1 演示产物是本地验证用事实，不应误认为待提交的数据集。
@@ -94,10 +94,11 @@ MultiAgent-Novel-Translation/
 
 最近提交（由新到旧）：
 
-1. `3de85e5`（2026-07-18）— 合并 PR #2：浏览器工作台浅色简约界面。
-2. `52c2ef6`（2026-07-18）— 重构浏览器工作台前端。
-3. `1f8d20d`（2026-07-18）— 合并 PR #1：可观测流式翻译工作台。
-4. `54cf988`（2026-07-18）— 完成流式、多 Agent、可观测性和浏览器工作台功能提交。
+1. `51f340e`（2026-07-18）— 合并 PR #3：安全的逐片长文本工作流。
+2. `0baa420`（2026-07-18）— 完成机械切片、四阶段逐片处理与残稿拒收。
+3. `3de85e5`（2026-07-18）— 合并 PR #2：浏览器工作台浅色简约界面。
+4. `52c2ef6`（2026-07-18）— 重构浏览器工作台前端。
+5. `1f8d20d`（2026-07-18）— 合并 PR #1：可观测流式翻译工作台。
 
 重要提示：`agent/observable-streaming-workbench` 的功能已经通过 PR #1/#2 合入 `main`。此前关于“尚未进入 main”或“新增文件尚未跟踪”的描述均为历史状态。
 
@@ -137,7 +138,7 @@ MultiAgent-Novel-Translation/
 - 高频 token 可批量写入 JSONL；SQLite 不保存 token 正文；sink 失败不会中断主流程。
 - 已实现本地 SSE dashboard，可实时显示运行、Agent 状态、LLM token、重试、QA 和结果事件。
 
-### 5.5 确定性初始切片（当前工作区，尚未提交）
+### 5.5 确定性初始切片
 
 - 新增 `mant.segmentation`，初始切片不调用 LLM；按标题/场景、空行/段落、句子、分句、空白和最终硬切的顺序生成候选边界，并在每个强边界区间做确定性动态规划。
 - 单片正文使用机械 token 估算并受 `max_core_tokens` 硬约束；相邻上/下文有独立预算，且不能跨标题/场景强边界。
@@ -152,7 +153,7 @@ MultiAgent-Novel-Translation/
 - 页面支持作品 ID、章节 ID、最大返工次数，显示六个 Agent 状态、流式文本和最终译文。
 - 服务端提供 `POST /api/translate` 和 `GET /api/jobs/{id}`，校验 ID、文件类型和输入长度；任务通过正式 CLI 子进程执行。
 - 当前服务限制同一时间一个任务，关闭监控服务时会回收子进程。
-- `start_mant.bat` 支持双击打开浏览器、拖放 TXT 直接翻译以及 `--check`；优先项目虚拟环境，并在启动时从 Windows 用户环境刷新 `AW4W_API_KEY`（不打印值）。
+- `start_mant.bat` 支持双击打开浏览器、拖放 TXT 直接翻译以及 `--check`；优先项目虚拟环境，并在启动时从 Windows 用户环境刷新 `DEEPSEEK_API_KEY`（不打印值）。
 
 ### 5.7 已有验证
 
@@ -190,6 +191,17 @@ git diff --check                          → 通过
 .venv/bin/python -m unittest discover -q → Ran 31 tests, OK
 .venv/bin/python -m compileall -q src tests → 通过
 git diff --check                          → 通过
+```
+
+片段并发、checkpoint、定点返工和并发监控实现后在 Windows 执行：
+
+```text
+python -m pytest -q                       → 44 passed
+python -m unittest discover -q           → Ran 34 tests, OK
+python -m compileall -q src tests         → 通过
+git diff --check                          → 通过，仅有 LF/CRLF 提示
+start_mant.bat --check                    → CONFIG / IMPORT / PYTHON 全部 ok
+dashboard 内嵌 JavaScript new Function   → 语法通过
 ```
 
 另用 fake LLM 对 253 片完整 LangGraph 压力验证：Translator、Editor、Polisher、QA
@@ -238,13 +250,141 @@ git diff --check                          → 通过
 告警，耗时 26.4 秒，润色/初稿字符比 1.1846。
 
 当前判断：已消除第一次长跑中确认的“章级截断后仍导出”和“网络残稿被接受”两类
-正确性故障；但整本级生产能力仍受顺序调用、无断点续跑、无总费用上限和章级术语
-提取输入预算等运维边界限制，不能宣称已经完成同规模真实复验。
+正确性故障；片段并发、调用次数预算和 checkpoint 已在当前工作区实现，但尚未完成
+同规模真实复验，且仍缺精确 RPM/TPM、金额上限和章级术语输入预算。
+
+### 5.9 长文本并发与断点恢复（本分支）
+
+- 新增 `mant.execution`：阶段级有界线程池、全局在途上限、调用预算、失败熔断、
+  取消信号、确定性结果归并和执行统计。
+- 每个片段任务创建独立 Agent 与真实 `LLMClient`；worker 使用
+  `copy_context()` 继承观测上下文，多个并发调用的事件仍准确归属 run/segment/round。
+- 新增 SQLite WAL checkpoint；按 `run_id + segment_id + stage + round + input_hash`
+  复用成功产物。连接逐操作创建并显式关闭；缓存读写失败只发事件，不中断翻译。
+- QA 生成 `rework_segment_indices`，返工轮只重跑失败片段，其他片段的初稿、润色稿
+  和 QA 结果保持原位；所有阶段即使乱序完成，也按 `segment_index` 写回。
+- Dashboard 现在按 `call_id` 隔离并发 token，可按片段和轮次切换具体调用；Agent 卡片
+  汇总正在运行、完成和失败的片段数。
+- 本地忽略配置当时启用 4 个全局在途请求、3200 次片段调用上限、20 次全局失败
+  熔断和 checkpoint；5.11 已改为分阶段熔断并增加 manifest。
+- 新增并发上限、乱序归并、ContextVar、调用预算、checkpoint 命中/故障降级和定点
+  返工测试；该阶段 `pytest` 为 44 passed，Dashboard JavaScript 语法检查通过。
+
+### 5.10 完整 TXT 真实 4 并发验收（2026-07-18/19）
+
+用户明确授权把 `data/raw/斗罗大陆外传神界传说.txt` 全文发送给官方 DeepSeek 并
+承担费用后，使用 `run-concurrency4-full-20260718-v1`、`max_rework=0` 完成真实
+长文本测试。原 GB18030 文件保留不动，运行副本转换为 UTF-8；机械切片仍为 253
+片、215,938 字、244,527 估算 token、0 硬切、精确回拼。
+
+- 总耗时 3,183.03 秒（约 53 分钟），执行器峰值并发准确为 4；Translator、
+  Editor、Polisher、QA 的有效并行度分别为 3.96、3.95、3.96、3.95。
+- Translator 253/253 成功；Editor 252/253；Polisher 253/253 且 0 完整性失败；
+  QA 提交 174 片，154 成功、20 失败，累计失败达到阈值后熔断剩余 79 片。
+- 片段任务提交 933，成功 912、失败 21、熔断拒绝 79；checkpoint 933 行、0 写入
+  错误。实际失败可略高于阈值 20，因为达到阈值时已有任务仍在途并允许完成。
+- 共有 975 个逻辑 LLM 调用，916 completed、59 OutputTruncated、42 retry、
+  0 fallback、0 个 429；Translator `seg0076` 有一次 ReadTimeout，等待后重试成功。
+- Terminologist 两次整章输出均截断并降级；QA 的 2048 输出上限产生 54 次截断尝试，
+  是最终失败/熔断的主要原因。trace 已知 usage 共 1,354,924 prompt + 1,366,810
+  completion = 2,721,734 token；实际金额以供应商账单为准。
+- 初稿 685,778 字符，润色稿 680,680，比例 0.9926；253 个 Polisher checkpoint
+  按 segment ID 拼接后与导出文件逐字符一致，0 DRAFT、0 NUL，仅粗检出 4 个 CJK
+  字符。确定性归并与产物完整性通过。
+- 最终 QA 5.1/rework，129 片 pass、124 片 rework，100 个 segment failure，标记
+  `needs_human_review`；该译文完整但不是已审定可发布版本。
+- 27,084 条 trace 中有 44 个 sequence 局部倒序点，全部来自不同并发 call 的 token
+  合批写入；975 个 call ID 均无跨 Agent/segment 身份串扰。回放端仍应按 sequence
+  排序或调整 token flush 策略。
+
+完整数字和建议位于 `data/exports/concurrency4-full/TEST_REPORT.md`；译文、metadata
+与 trace 位于同目录/`data/traces/`，均被 Git 忽略。未自动用相同 run ID 继续恢复，
+避免在 QA 配置未修正前产生额外费用。
+
+### 5.11 真实验收后的加固（本分支，2026-07-19，该加固阶段未产生 API 调用）
+
+- checkpoint 指纹升级为 v2：除正文/上下文/Prompt/模型外，现覆盖角色 tier、
+  temperature、max_tokens、结构化 JSON 与修复策略、端点、timeout、供应商重试和
+  残稿重试。密钥值不进入指纹或 manifest；修改 QA 参数只使相关阶段安全失效。
+- 新增 `data/runtime/runs/<run_id>.json` 本地 manifest 和 `mant resume-run`。
+  当前支持 `--stage qa --failed-only`：校验原文件未变化，从最终状态直接进入 QA，
+  复用成功 QA checkpoint，只重跑技术失败或缺失片；上游四个角色不再调用。
+- QA 默认改为 768 token 的紧凑 JSON object，最多 3 条短建议；首次 schema 无效时
+  最多做一次 384-token JSON 修复。参数可由 `agents.qa.*` 覆盖。
+- Editor 默认改为 1536-token JSON object，取代真实长跑时容易产生高额冗长输出的
+  4096-token 自由格式边界；可由 `agents.editor.*` 覆盖并纳入 v2 指纹。
+- 已按 DeepSeek 2026 官方文档增加角色级 `thinking`，本地官方配置对五个业务角色
+  显式 `disabled`，客户端按官方 OpenAI SDK 方式写入 `extra_body.thinking.type`。
+  类默认仍为 `None`，其他兼容供应商不会无条件收到 DeepSeek 扩展字段。
+- `qa_score` 现在只对真实评估成功片加权；`qa_summary` 单独报告片段/token 覆盖率、
+  已评估片通过率和 `CircuitOpen`/`AgentOutputInvalid` 等技术失败分类。
+- 失败熔断新增 `max_failures_per_stage`，本地真实配置已取消全局 20 次共享额度，
+  改为各阶段独立上限，避免 Editor 失败占用 QA 额度。
+- Terminologist 已复用机械片段并发抽取，候选按源术语和置信度确定性去重，再统一
+  与术语库仲裁并一次性写入；不再把 21.6 万字整章送入一次术语输出。
+- 当前离线验收：`pytest` 54 passed、`unittest` 40 passed、compileall、Dashboard
+  JavaScript 语法、`start_mant.bat --check` 和
+  `git diff --check` 通过。覆盖 manifest 往返、QA 失败定向恢复、角色参数缓存失效、
+  分阶段熔断和术语分片归并。没有再次调用 DeepSeek，也没有新增 API 费用。
+- 同 run 恢复会读取既有 JSONL 的最大 `sequence` 并继续编号，避免恢复事件因
+  SQLite `(run_id, sequence)` 重复键而被忽略。
+- 2026-07-18 的真实运行使用旧指纹且没有 manifest，不能由新 `resume-run` 安全
+  定向恢复；需要用新代码启动一个新 run，之后才能验证真实失败恢复。
+
+### 5.12 新代码真实 20 片、4 并发验收（2026-07-19）
+
+用户明确授权把原 TXT 的前 20 个正常大小切片及处理中间文本发送给官方 DeepSeek，
+并承担 API 费用。宿主账户 `CASTORICE\\32415` 的用户作用域中存在有效的
+`DEEPSEEK_API_KEY`；普通 Codex 命令运行在 `CodexSandboxOffline` 隔离账户下，
+不能直接读取宿主 HKCU，真实测试因此在获准联网的宿主子进程中执行，密钥未写入
+配置、日志或仓库。
+
+运行使用 `run-concurrency4-20-20260719-v3`、`max_rework=0` 和本地官方
+`deepseek-v4-flash` 配置：
+
+- 输入 15,978 字、17,868 估算 token，共 20 片；单片最大 1,126 token，0 次硬切，
+  规范化后精确回拼通过。
+- 总耗时 143.1 秒；术语、翻译、编辑、润色、QA 分别耗时 30.86、33.69、44.11、
+  23.44、10.38 秒；执行器和 LLM 调用峰值并发均准确为 4。
+- 100 个片段任务中 99 个成功、1 个失败；102 次 LLM 启动，99 次完成、3 次
+  `OutputTruncated`、2 次完整重试、0 次 DRAFT fallback。
+- trace 可归集的真实用量（含三次截断响应）为 158,433 prompt + 42,645
+  completion = 201,078 token；实际费用以供应商账单为准。
+- Terminologist 20/20、Translator 20/20、Editor 19/20、Polisher 20/20、QA 20/20
+  完成。最终英文 46,408 字符，0 个 `[DRAFT]`、0 个 CJK 字符、0 个代码围栏。
+- QA 覆盖率和 token 覆盖率均为 1.0，代码侧 20/20 片判 pass，加权 8.73；但两个
+  管线级失败仍使章级 verdict 为 `rework`，并标记片 0、13 需要复核。未开启返工，
+  因此该产物用于验收链路，不视为已审定发布稿。
+
+本次确认两个尚未修复的根因：
+
+1. **Editor 输出契约与预算不匹配**：片 13 有 19 个段落、1,126 估算 token，Editor
+   提示要求逐段穷举问题且 `review_notes` 数量无上限，但输出上限固定为 1,536
+   token。两次响应分别生成约 17/19 个问题，均精确在 1,536 completion token 以
+   `finish_reason=length` 截断；相同提示和预算的一次完整重试不能解决结构性超长，
+   残缺 JSON 被正确丢弃，最终该片 Editor 失败。片 1 也曾截断一次，但重试缩短为
+   706 token 后成功，说明当前重试只能覆盖偶发冗长，不能覆盖稳定超预算输出。
+2. **片 0 的上游漏译被误表现为润色膨胀**：原片 171 字符，包含站点声明、分隔线
+   和书名；Translator 只输出 47 字符书名。Editor 正确记录 3 处遗漏，其中声明为
+   high；Polisher 随后越过“只改语言”的角色边界，补入声明和分隔线，但保留原书名
+   并再次追加书名，得到 476 字符、顺序和重复均异常的候选。长度完整性保护以残缺
+   初稿为分母，检测到比例 10.128 超过上限 2.5 后正确拒绝候选，却只能回退到同一
+   残缺初稿。更深层原因是缺少真正按 Editor 意见修订事实性遗漏的阶段，Polisher
+   与长度保护被迫承担了不适合的纠错职责。
+
+片 0 还暴露 QA 边界风险：模型原始 verdict 为 `rework`，四维分数 6/8/8/7；代码
+计算恰好 7.0 且最低项恰好 6.0，按 `>= 7.0` / `>= 6.0` 强制改判 pass，并覆盖模型
+裁决。章级失败标记最终阻止了整体 pass，但单片 QA 元数据仍会显示 pass。上述问题
+仅完成诊断和记录，本次未修改对应业务逻辑。
 
 ## 6. 正在开发或尚未稳定的部分
 
-- 流式 LLM、事件系统、Dashboard、浏览器工作台和统一 pipeline runner 已进入 `main`；机械切片、逐片下游、残稿重试及其新增测试仍在当前未提交工作区。
-- 253 片离线全图与 2 片真实接口已验收；同规模真实长文、供应商限流和成本边界仍需在断点续跑与费用保护完成后专项验证。
+- 流式 LLM、机械切片、逐片下游和浏览器工作台已进入 `main`；本轮并发执行层、
+  checkpoint、定点返工、并发监控 UI 及其测试位于当前 PR 分支。
+- 253 片旧代码和 20 片新代码的真实 DeepSeek 4 并发均已完成；并发调度、确定性
+  归并、checkpoint、v2 指纹和 manifest 已由新 run 实际产出。20 片运行仍有一片
+  Editor 因固定输出预算失败；`resume-run --stage qa --failed-only` 尚未在真实失败
+  run 上执行，因为该次失败发生在 edit 阶段而不是 QA 阶段。
 - macOS 命令行与浏览器 API 已验证；Windows `start_mant.bat` 的真实供应商启动、拖放与浏览器视觉交互仍需在 Windows 环境人工验收。
 - 浏览器工作台通过 API 和 JavaScript 语法测试，但当前会话没有可用的浏览器自动化运行时，因此尚缺一次真实点击、拖放、滚动和视觉布局检查。
 - 现有架构/路线图文档有少量“骨架阶段”“三个子命令”等旧描述，需要在功能提交稳定后统一校正。
@@ -254,9 +394,12 @@ git diff --check                          → 通过
 
 ### 翻译质量与长文本
 
-- Translator/Editor/Polisher/QA 已逐片运行并顺序归并；Terminologist 仍读取整章，且尚无层级术语归并、总 Prompt/调用费用预算、供应商精确 tokenizer、并发限流、断点续跑与跨章节任务队列，因此还不能宣称超长文本生产链路完备。
+- Terminologist/Translator/Editor/Polisher/QA 已逐片有界并发并确定性归并，支持
+  调用次数预算、阶段失败熔断、v2 checkpoint 和 QA manifest 恢复；仍缺精确
+  RPM/TPM、总 Prompt/金额预算、供应商 tokenizer 与跨章节任务队列。
 - Polisher 尚未实现严格的专有名词保护和风格指纹；Terminologist 缺 few-shot、缓存和置信度校准。
-- 流中断或 `finish_reason=length` 会完整重试并拒绝残稿；但语法完整、语义却不满足 schema 的结构化响应仍只有各 Agent 的解析降级，没有通用 JSON 修复/再询问机制。
+- 流中断或 `finish_reason=length` 会完整重试并拒绝残稿；QA 已有一次有界 JSON 修复，
+  其他结构化 Agent 仍只有解析降级，没有统一的 schema 修复机制。
 - QA 及格阈值仍有硬编码，返工意见没有“已解决/未解决”生命周期，循环只固定返回 Translator，不能按问题类型做局部编辑。
 
 ### 记忆与检索
@@ -274,23 +417,43 @@ git diff --check                          → 通过
 
 ### 运行与产品化
 
-- 没有多章节批处理、持久化任务队列、checkpoint/resume、浏览器取消任务和崩溃恢复。
+- 没有多章节批处理、持久化任务队列和浏览器取消/恢复按钮；CLI 已提供
+  `resume-run --stage qa --failed-only`，但浏览器尚未暴露该入口。
 - 浏览器任务表位于内存，重启后 job 状态丢失；trace 文件仍在，但没有完整的运行历史 UI。
 - 当前只允许一个并发任务；没有用户认证、TLS、租户隔离或部署方案，因此只能作为本机工具使用。
 - 只在供应商返回 stream usage 且配置启用时才能得到 token 使用；尚无可靠的价格表和金额计算。
 - `python-dotenv` 已声明为依赖，但 CLI 配置加载尚未显式调用 `load_dotenv()`；当前可靠方式仍是系统/进程环境变量。
-- `start_mant.bat` 当前针对 `AW4W_API_KEY` 做用户环境刷新，若改用其他 `api_key_env`，批处理不会自动跟随配置。
+- `start_mant.bat` 与当前 DeepSeek 官方配置统一使用 `DEEPSEEK_API_KEY`；若以后改用其他 `api_key_env`，需同步调整批处理刷新逻辑。
 
 ## 8. 当前已知问题与风险
 
-1. **真实集成验收范围有限**：两片真实付费链路和 253 片离线全图已经跑通，但修复后尚未重跑 253 片真实长文，也未覆盖 QA 实际返工、供应商限流/中断和 Windows 一键启动。
-2. **成本与上下文风险**：四个正文 Agent 已逐片受控，Terminologist 仍是章级输入；系统没有供应商精确 tokenizer、全调用预算或费用上限，253 片一轮约产生 1,013 次正文阶段调用，返工还会继续放大费用。
+1. **Editor 最坏情况输出仍会截断**：20 片新 run 已完成真实质量/费用验收，但
+   19 段、1,126 token 的片 13 让无数量上限的审校意见两次耗尽 1,536 输出 token。
+   当前相同参数完整重试不能解决稳定超预算，且 Editor 没有 QA 式紧凑修复通道。
+2. **成本与上下文风险**：五个角色已有片段调用次数上限，Terminologist 已分片；
+   系统仍没有供应商精确 tokenizer、可靠 token/金额上限。已经在途的请求
+   不会被调用预算强制中止，LLMClient 内部重试也不单独计数，因此预算是片段任务
+   派发上限而不是绝对供应商请求或费用上限。
 3. **记忆闭环不完整**：能读术语/TM/故事设定，但章节成功后不会自动形成下一章可用的新记忆。
-4. **重试策略仍需细化**：残稿/截断已经安全重试并拒收，但外层重试尚未按 HTTP 状态细分，也没有 jitter、熔断或供应商限流退避策略。
+4. **重试策略仍需细化**：残稿/截断已经安全重试并拒收，片段失败数量可熔断新派发；
+   但外层重试尚未按 HTTP 状态细分，也没有共享速率桶或 jitter 退避。
 5. **本地服务边界**：Dashboard 只适合 `127.0.0.1` 本机使用；若直接暴露到局域网/公网，会缺少认证和安全防护。
 6. **进度与设计文档漂移**：部分章节仍保留“骨架阶段”“三个子命令”和旧分支状态，不能作为当前实现的唯一事实来源。
 7. **配置示例漂移**：示例、本地设置、BAT 环境变量刷新逻辑不是完全由一个 schema 驱动。
 8. **行尾提示**：Windows 下 `git diff --check` 会输出 LF 将转 CRLF 的提示；目前没有实际 whitespace error，不应因此全仓改行尾。
+9. **旧运行无法直接使用新恢复入口**：2026-07-18 的真实 run 没有 manifest 且使用
+   v1 指纹；不能在新代码下安全复用。manifest 当前也只在正常返回后写入，中途崩溃
+   仍缺增量恢复清单。
+10. **并发 token 持久化局部乱序**：本次 27,084 条 trace 有 44 个 sequence 局部
+    倒序点，均为不同 call 的 token 合批 flush；call 身份无串扰、业务状态不受影响，
+    但严格历史回放应按 sequence 排序。
+11. **漏译后的纠错职责不闭合**：片 0 证明 Translator 可能把站点声明等前置材料
+    当成噪声而只翻译书名；Editor 能发现遗漏但不改稿，Polisher 不应负责事实性
+    补译，长度保护又只能回退残缺初稿。需要明确前置材料策略和“按审校意见修订”
+    的责任阶段，而不是继续依赖润色模型偶然补全。
+12. **QA 阈值边界可覆盖模型 rework**：片 0 的 accuracy=6、加权分=7.0 恰好满足
+    当前硬编码下限，代码把模型原始 `rework` 改成 `pass`。章级失败标记本次仍发挥
+    兜底作用，但单片裁决对高严重度遗漏不够保守。
 
 ## 9. 重要设计决策及原因
 
@@ -299,7 +462,11 @@ git diff --check                          → 通过
 | 六角色分工，但用统一 BaseAgent 契约 | 让提示词和职责可独立演进，同时统一执行、重试、观察和测试边界 |
 | 初始切片使用确定性规则而非 LLM | 零额外调用成本、可复现且可精确回拼；结构边界和硬切降级都能测试与审计 |
 | 完整原文与片段元数据同时进入 state | 保留旧 `segments: list[str]` 兼容性，同时让章级 Agent 无需有损重拼，译者可安全获得不重复输出的相邻上下文 |
-| 四个正文 Agent 共用同一片段序列 | 把所有模型输入/输出限制在片段预算内；按 ordinal 确定性归并，并能把失败和 QA 精确定位到单片 |
+| 五个业务 Agent 共用同一片段序列 | 把所有模型输入/输出限制在片段预算内；按 ordinal 确定性归并，并能把失败和 QA 精确定位到单片 |
+| 并发只发生在同一阶段的不同片段间 | 保持 translate→edit→polish→QA 数据依赖清晰，同时获得主要吞吐收益 |
+| 每个 worker 创建独立 Agent/LLMClient | 避免 `last_notes`、调用 ID 和 token 计数等可变状态在线程间串扰 |
+| checkpoint 使用 v2 语义指纹 + manifest | 同 run 可定向恢复，生成参数或输入变化时安全失效；manifest 冻结恢复所需上游状态 |
+| QA 只返工失败片段 | 长文本中局部问题不应放大为全章四阶段重跑，显著降低费用与延迟 |
 | 截断或流中断后丢弃残稿并完整重试 | 部分译文没有可靠的自动续接边界；拒绝残稿比把缺失内容悄悄导出更安全 |
 | 润色稿做片段长度比例检查 | 快速拦截最常见的截断和异常膨胀；越界时只回退对应初稿，并迫使 QA/人工复核 |
 | 用 LangGraph 表达 QA 回环 | 返工是显式状态机而非隐藏递归，可限制次数、保存状态并测试路由 |
@@ -317,33 +484,46 @@ git diff --check                          → 通过
 
 ## 10. 最近修改的文件
 
-以下是当前工作区相对 `main` 的业务变更清单；`.agents/PROGRESS.md` 还包含前一次
-真实供应商与仓库状态核验留下的未提交更新。
+以下是当前分支相对 `main`（`51f340e`）的变更清单。
 
-### 已跟踪且修改
+### 本分支修改
 
-- 文档与配置：`.agents/AGENTS.md`、`.agents/PROGRESS.md`、`README.md`、`config/settings.example.yaml`、`docs/agent-design.md`、`docs/architecture.md`、`docs/observability.md`。
-- 包、Agent 与工作流：`src/mant/__init__.py`、`src/mant/agents/editor.py`、`src/mant/agents/orchestrator.py`、`src/mant/agents/translator.py`、`src/mant/llm/client.py`、`src/mant/workflow/graph.py`、`src/mant/workflow/state.py`。
-- CLI 与测试：`src/mant/cli.py`、`tests/test_observability.py`、`tests/test_translator_feedback.py`、`tests/test_workflow.py`。
-- 被 Git 忽略的 `config/settings.yaml` 也已加入 `segmentation`、逐片完整性阈值和 `partial_retries` 默认值；未写入密钥值。
+- 文档与配置：`.agents/PROGRESS.md`、`README.md`、`config/settings.example.yaml`、
+  `docs/architecture.md`、`docs/observability.md`、`start_mant.bat`。
+- 工作流与监控：`src/mant/cli.py`、`src/mant/workflow/graph.py`、
+  `src/mant/workflow/state.py`、`src/mant/observability/dashboard.py`、
+  `src/mant/observability/runtime.py`、`src/mant/observability/sinks.py`。
+- Agent 与供应商：`src/mant/agents/base.py`、`editor.py`、`polisher.py`、`qa.py`、
+  `terminologist.py`、`translator.py`，以及 `src/mant/llm/client.py`。
+- 测试：`tests/test_observability.py`、`tests/test_workflow.py`。
+- 被 Git 忽略的 `config/settings.yaml` 已启用保守并发、调用/失败预算和 checkpoint；
+  仍只引用 `DEEPSEEK_API_KEY` 环境变量，未写入密钥值。
 
-### 新增且尚未跟踪
+### 本分支新增
 
-- `src/mant/segmentation.py`：确定性切片实现。
-- `tests/test_segmentation.py`：可逆性、结构边界、预算、硬切、确定性和无 LLM 测试。
-- `docs/segmentation.md`：完整设计与配置说明。
+- `src/mant/execution/`：执行配置、任务契约、有界调度器、SQLite checkpoint 与
+  运行 manifest。
+- `tests/test_execution.py`：并发、上下文、预算与 checkpoint 测试。
+- `docs/concurrency.md`：完整执行、恢复、监控和限制说明。
 
 ## 11. 下一步最合理的开发顺序
 
-1. **补齐长文本运行控制**：四个正文 Agent 已逐片；下一步把 Terminologist 改为分片/层级术语归并，增加 checkpoint/resume、有界并发、供应商精确 token 预检和总调用/费用保护，再做授权长章节真实复验。
-2. **完成 Windows/浏览器人工验收**：在 Windows 运行 `start_mant.bat --check`，实际点击、拖放、滚动并核对视觉布局、密钥继承和子进程回收。
-3. **校正文档与配置漂移**：统一 README、架构/路线图、配置示例和 BAT 的环境变量约定，删除过期的骨架/分支状态描述。
-4. **闭合章节记忆**：生成章节摘要、实体/事件更新，成功后把审定译文回写 TM，并让下一章真实加载 `prev_summary`。
-5. **加固 QA 返工**：把阈值配置化，跟踪反馈是否解决，按术语/内容/文风问题路由到合适 Agent，增加最终残缺 JSON 的修复策略。
-6. **完善运行控制**：浏览器取消、任务持久化、checkpoint/resume、历史 trace 查看；确认资源与成本模型后再考虑有限并发。
-7. **建立评估闭环**：实现 `mant.eval`、固定测试集、baseline 与多 Agent 对照、COMET/LLM judge/MQM、时延和成本统计，然后用数据决定哪些 Agent/记忆策略值得保留。
-8. **升级对齐与检索**：在可复现基线上引入 vecalign/LASER、真实 embedding 和 FAISS 持久化；用评估集验证收益，不只替换实现。
-9. **最后处理采集与部署**：只有在授权明确后实现 collector；只有在认证、TLS、隔离和队列就绪后才把 Dashboard 暴露到本机以外。
+1. **先闭合本次两个质量问题**：为 Editor 建立与片段规模匹配的有界、紧凑输出契约
+   和有效的超长恢复策略；明确前置声明等非小说正文的处理规则，并增加真正按审校
+   意见修订遗漏的阶段或路由。同步收紧 QA 对 high omission 和阈值边界的裁决。
+2. **真实验证失败恢复**：用新的小样 run 覆盖 checkpoint 命中和失败阶段恢复；当前
+   CLI 只支持 QA failed-only，需先决定是否把安全恢复扩展到 edit/polish。
+3. **补精确供应商限流与费用保护**：实现共享 RPM/TPM 速率桶、429 Retry-After +
+   jitter、stream usage 聚合、模型价格表和金额上限，再考虑 253 片真实复验。
+4. **完成 Windows/浏览器人工验收**：运行 `start_mant.bat --check`，实际点击、拖放、
+   并发调用切换、滚动并核对视觉布局、密钥继承和子进程回收。
+5. **完善运行控制**：增加浏览器取消/恢复按钮、任务表持久化、运行中增量 manifest 和从 trace 重建历史。
+6. **闭合章节记忆**：生成章节摘要、实体/事件更新，成功后把审定译文回写 TM，并让下一章真实加载 `prev_summary`。
+7. **加固 QA 返工**：把阈值配置化，跟踪反馈是否解决，按问题类型路由到合适 Agent。
+8. **建立评估闭环**：实现固定测试集、baseline 对照、质量/时延/成本统计。
+9. **升级对齐与检索**：引入 vecalign/LASER、真实 embedding 和 FAISS 持久化。
+10. **最后处理采集与部署**：授权明确后再实现 collector；认证、TLS、隔离和队列
+    就绪后才把 Dashboard 暴露到本机以外。
 
 ## 12. 下一位 AI 的快速接手步骤
 

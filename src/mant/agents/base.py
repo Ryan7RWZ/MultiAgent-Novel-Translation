@@ -261,10 +261,23 @@ class BaseAgent(ABC):
         """
         return parse_json_output(text, notes=notes)
 
-    def complete(self, user: str, *, temperature: float = 0.3, max_tokens: int = 4096) -> str:
+    def complete(
+        self,
+        user: str,
+        *,
+        temperature: float = 0.3,
+        max_tokens: int = 4096,
+        response_format: dict[str, Any] | None = None,
+        thinking: str | None = None,
+    ) -> str:
         """便捷调用：以子类 ``SYSTEM_PROMPT`` 为系统提示词请求 LLM。"""
         return self.llm.complete(
-            self.SYSTEM_PROMPT, user, temperature=temperature, max_tokens=max_tokens
+            self.SYSTEM_PROMPT,
+            user,
+            temperature=temperature,
+            max_tokens=max_tokens,
+            response_format=response_format,
+            thinking=thinking,
         )
 
     def _result(

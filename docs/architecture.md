@@ -83,6 +83,7 @@ flowchart TB
 | --- | --- | --- | --- |
 | `work_id` | `str` | 入口 | 作品 ID（关联记忆层一切数据） |
 | `chapter_id` | `str` | 入口 | 章节 ID |
+| `run_id` | `str` | 入口 | 运行/checkpoint 命名空间；恢复时保持不变 |
 | `source_text` | `str` | 入口 | 安全规范化后的无损章级原文 |
 | `segments` | `list[str]` | 入口 | 待译原文段列表（按段推进） |
 | `segment_meta` | `list[dict]` | 入口 | 定位、边界、哈希与相邻上下文；与 segments 等长 |
@@ -93,7 +94,10 @@ flowchart TB
 | `polished_segments` / `polished` | `list[str]` / `str` | 润色 | 分片润色稿与确定性章级拼接结果 |
 | `segment_failures` | `list[dict]` | 翻译 / 审校 / 润色 / QA | 分片失败与完整性告警；非空时章级 QA 不得放行 |
 | `segment_qa` | `list[dict]` | QA | 每片 QA 得分、裁决和明细 |
-| `qa_score` | `float` | QA 终审 | 质量分（0–10） |
+| `rework_segment_indices` | `list[int]` | QA | 下一轮需要定点重跑的片段序号 |
+| `execution_stats` | `dict` | 执行层 | 派发、失败、拒绝、并发峰值和 checkpoint 统计 |
+| `qa_summary` | `dict` | QA | 实际评估覆盖率、通过率与技术失败分类 |
+| `qa_score` | `float` | QA 终审 | 已成功评估片的 token 加权质量分（0–10），须结合 qa_summary.coverage 解读 |
 | `qa_verdict` | `str` | QA 终审 | `"pass"` / `"rework"` |
 | `rework_count` | `int` | 调度（条件边） | 当前回退返工次数 |
 | `max_rework` | `int` | 入口（取自 `workflow.max_rework`） | 回退次数上限，防止死循环 |
@@ -102,8 +106,9 @@ flowchart TB
 | `runtime_notes` | `list[str]` | 各节点 | 记忆故障、降级与解析说明 |
 
 `story_bible` 与 `tm_matches` 必须随 state 流转，不得保存在 compiled graph
-闭包中；这保证同一张图被多个章节并发复用时不会串数据。LLM token 增量只进入
-事件总线，不进入 state，避免高频增量触发 LangGraph checkpoint 膨胀。
+闭包中，避免章节间串数据。正式入口 `run_chapter` 每次运行独立构图，使执行预算、
+取消信号和统计也保持 run 级隔离。LLM token 增量只进入事件总线，不进入 state，
+避免高频增量触发 LangGraph checkpoint 膨胀。
 
 ### 3.2 主流程时序
 
@@ -115,15 +120,16 @@ sequenceDiagram
     participant M as MemoryHub
 
     O->>O: 机械切片 + token 预算 + 可逆性校验
-    O->>G: 无损章级 source_text
-    G->>M: lookup_terms + 新术语抽取
+    O->>G: 同一组机械片段
+    G->>G: 逐片并发抽取 + 确定性候选归并
+    G->>M: lookup_terms + 一次性写入新术语
     M-->>G: TermEntry / glossary
     G->>S: 写入 state.glossary
     loop 最多 max_rework+1 轮
         S->>M: search_tm / get_story_bible（注入上下文）
-        loop 每个 segment
-            S->>S: 翻译 → 审校 → 润色 → QA
-        end
+        S->>S: 各阶段内按 segment 有界并发
+        S->>S: translate → edit → polish → QA
+        S->>S: 每阶段按 segment_index 确定性归并
         S->>S: 按 token 权重归并 QA；任一分片失败则 rework
         alt qa_verdict == pass
             S-->>O: polished + qa_score
@@ -143,13 +149,20 @@ sequenceDiagram
   润色稿字符比例越界时只回退对应初稿。流中断或输出上限产生的残稿不得进入状态。
 - **确定性归并**：Editor 批注按 `segment_id` 合并；QA 章级分数按源片估算 token
   加权，只有所有片均 pass 且 `segment_failures` 为空时才允许章级 pass。
+- **定点返工**：QA 和完整性失败写入 `rework_segment_indices`；下一轮四个正文
+  阶段只创建这些片段的任务，未失败片段沿用上一轮完整产物。
 - **上限兜底**：`rework_count >= max_rework` 时强制放行并打 `needs_human_review` 标记，避免 LLM 间互相不认可导致的死循环与费用失控。上限默认值取配置 `workflow.max_rework`。
 - **回退落点**：当前设计回退到"翻译"节点（携带审校与 QA 的全部批注重译）；如实验表明重译不如定点修订，可在 M4 联调期改为回退到"审校"节点，状态机条件边留有此扩展点。
 
 ## 4. 协作控制层
 
 - **调度 Agent（orchestrator）**：不直接翻译。初始切片完全使用确定性规则，保留场景线、重复行和空白，并为每片生成定位与相邻上下文；再把片段拆成 `AgentTask` 序列、调用状态机和维护返工上限。完整算法与不变量见 [segmentation.md](./segmentation.md)。
-- **术语 Agent（terminologist）**：章节翻译前扫描原文，命中已有术语库（`lookup_terms`），并对疑似新术语做抽取与翻译，写入 `state.glossary` 与术语库（`record_terms`）。保证"同一作品内，先入库者为准"。
+- **术语 Agent（terminologist）**：章节翻译前按机械片段并发抽取疑似新术语，
+  按源术语与置信度确定性去重，再统一命中/写入术语库，写入 `state.glossary`。
+  保证“同一作品内，先入库者为准”，并避免整章输出截断和并发写库竞争。
+- **执行器（execution）**：每个片段任务创建独立 Agent/LLMClient，在阶段 worker
+  和全局在途上限内并发；输入哈希匹配时复用 SQLite checkpoint，达到调用预算或
+  失败阈值后停止派发。详细契约见 [concurrency.md](./concurrency.md)。
 
 各 Agent 的详细职责、输入输出契约与 Prompt 设计见 [agent-design.md](./agent-design.md)。
 
@@ -260,6 +273,8 @@ erDiagram
 | `workflow.max_rework` | 状态机入口 | QA 回退次数上限 |
 | `workflow.min_polished_segment_ratio` / `max_polished_segment_ratio` | 润色节点 | 分片润色稿相对初稿的完整性长度范围 |
 | `segmentation.*` | 调度 Agent | 机械初始切片的目标/最大/最小正文 token、相邻上下文预算与片数保护上限 |
+| `agents.*` | Agent 工厂 | 角色档位、temperature、max_tokens 与结构化输出策略 |
+| `concurrency.*` | 执行层 | 阶段 worker、全局在途上限、分阶段失败预算、checkpoint 与 manifest 路径 |
 | `observability.*` | CLI / 可观测层 | 终端流式显示、JSONL/SQLite 路径、token 合批与本地监控地址 |
 
 约定：除 CLI/脚本入口外，所有模块通过构造参数接收配置字典，不直接读取配置文件。
@@ -271,6 +286,7 @@ src/mant/
 ├── llm/            # LLMClient：fast/strong 双档，缺 key 返回 [DRAFT] 占位
 ├── agents/         # base.py（AgentTask/AgentResult/BaseAgent）+ 六个 Agent
 ├── segmentation.py # 无 LLM 的结构/token 预算初始切片
+├── execution/      # 分片有界并发、预算、checkpoint 与确定性归并
 ├── workflow/       # state.py（TranslationState）+ LangGraph 图构建与条件边
 ├── observability/  # 类型化事件、终端/JSONL/SQLite sink、本地 SSE 监控页
 ├── memory/         # models.py（dataclass）+ MemoryHub 门面 + SQLite/FAISS 适配

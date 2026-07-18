@@ -65,6 +65,24 @@ def _default_export_path(kind: str, work_id: str, chapter_id: str, suffix: str) 
     return Path("data/exports") / kind / work_id / f"{chapter_id}{suffix}"
 
 
+def _max_trace_sequence(path: Path) -> int:
+    """读取已有 JSONL 的最大事件序号；坏行不阻断恢复。"""
+    maximum = 0
+    if not path.is_file():
+        return maximum
+    try:
+        with path.open("r", encoding="utf-8") as handle:
+            for line in handle:
+                try:
+                    event = json.loads(line)
+                    maximum = max(maximum, int(event.get("sequence", 0) or 0))
+                except (AttributeError, TypeError, ValueError, json.JSONDecodeError):
+                    continue
+    except OSError:
+        return 0
+    return maximum
+
+
 def cmd_m1_pipeline(args: argparse.Namespace) -> int:
     """运行 M1 离线语料管道。"""
     cfg = load_settings(args.config)
@@ -149,7 +167,21 @@ def cmd_baseline(args: argparse.Namespace) -> int:
 def cmd_translate_chapter(args: argparse.Namespace) -> int:
     """运行多智能体单章工作流并导出译文与元数据。"""
     cfg = load_settings(args.config)
+    resume_manifest = getattr(args, "resume_manifest", None)
+    resume_state = (
+        dict(resume_manifest.get("state") or {})
+        if isinstance(resume_manifest, dict)
+        else None
+    )
+    work_id = str(
+        (resume_manifest or {}).get("work_id") or args.work_id
+    )
+    chapter_id = str(
+        (resume_manifest or {}).get("chapter_id") or args.chapter_id
+    )
     max_rework = args.max_rework
+    if max_rework is None and resume_state is not None:
+        max_rework = int(resume_state.get("max_rework", 0) or 0)
     if max_rework is None:
         max_rework = cfg.get("workflow", {}).get("max_rework", 2)
     if max_rework < 0:
@@ -177,21 +209,34 @@ def cmd_translate_chapter(args: argparse.Namespace) -> int:
             trace_enabled=args.trace,
             verbose=args.verbose,
         )
+        if resume_state is not None and observer is not None and args.run_id:
+            trace_dir = Path(obs_cfg.get("trace_dir", "data/traces"))
+            observer.continue_after(
+                _max_trace_sequence(trace_dir / f"{args.run_id}.jsonl")
+            )
         memory = _build_memory(cfg)
         final = run_chapter(
-            args.work_id,
+            work_id,
             input_path,
             _build_llm(cfg),
             memory,
-            chapter_id=args.chapter_id,
+            chapter_id=chapter_id,
             max_rework=max_rework,
             observer=observer,
             run_id=args.run_id,
             segmentation_config=cfg.get("segmentation") or {},
             workflow_config=cfg.get("workflow") or {},
+            execution_config=(
+                getattr(args, "execution_config_override", None)
+                or cfg.get("concurrency")
+                or {}
+            ),
+            agent_config=cfg.get("agents") or {},
+            resume_state=resume_state,
+            start_stage=getattr(args, "resume_stage", "retrieve"),
         )
         output_path = Path(args.output) if args.output else _default_export_path(
-            "multi_agent", args.work_id, args.chapter_id, ".txt"
+            "multi_agent", work_id, chapter_id, ".txt"
         )
         output_path.parent.mkdir(parents=True, exist_ok=True)
         translated = str(final.get("polished") or final.get("draft") or "")
@@ -204,14 +249,19 @@ def cmd_translate_chapter(args: argparse.Namespace) -> int:
         )
         metadata_path.parent.mkdir(parents=True, exist_ok=True)
         metadata = {
-            "run_id": observer.last_run_id if observer is not None else "",
-            "work_id": args.work_id,
-            "chapter_id": args.chapter_id,
+            "run_id": (
+                observer.last_run_id
+                if observer is not None
+                else str(final.get("run_id") or args.run_id or "")
+            ),
+            "work_id": work_id,
+            "chapter_id": chapter_id,
             "output": str(output_path),
             "segments": len(final.get("segments") or []),
             "segmentation": final.get("segmentation_stats") or {},
             "qa_score": final.get("qa_score", 0.0),
             "qa_verdict": final.get("qa_verdict", ""),
+            "qa_summary": final.get("qa_summary") or {},
             "rework_count": final.get("rework_count", 0),
             "max_rework": final.get("max_rework", max_rework),
             "needs_human_review": any(
@@ -220,6 +270,15 @@ def cmd_translate_chapter(args: argparse.Namespace) -> int:
             ),
             "review_notes": final.get("review_notes") or [],
             "segment_failures": final.get("segment_failures") or [],
+            "rework_segment_indices": final.get("rework_segment_indices") or [],
+            "execution": final.get("execution_stats") or {},
+            "resume": {
+                "resumed": resume_state is not None,
+                "stage": getattr(args, "resume_stage", "") if resume_state else "",
+                "failed_only": bool(
+                    getattr(args, "resume_failed_only", False)
+                ) if resume_state else False,
+            },
             "qa_segments": {
                 "count": len(final.get("segment_qa") or []),
                 "pass": sum(
@@ -279,6 +338,54 @@ def cmd_translate_chapter(args: argparse.Namespace) -> int:
             close()
         if observer is not None:
             observer.close()
+
+
+def cmd_resume_run(args: argparse.Namespace) -> int:
+    """从本地 manifest 恢复同一 run，只重新执行目标阶段失败/缺失片。"""
+    cfg = load_settings(args.config)
+    try:
+        from mant.execution import ExecutionConfig, RunManifestStore
+
+        current_execution = dict(cfg.get("concurrency") or {})
+        parsed = ExecutionConfig.from_mapping(current_execution)
+        manifest = RunManifestStore(parsed.manifest_dir).load(args.run_id)
+        stored_execution = dict(
+            ((manifest.get("settings") or {}).get("execution") or {})
+        )
+        stored_checkpoint = dict(stored_execution.get("checkpoint") or {})
+        if not stored_checkpoint.get("enabled"):
+            raise ValueError("该运行没有启用 checkpoint，无法定向恢复")
+        current_execution["checkpoint"] = stored_checkpoint
+        current_execution["manifest"] = dict(
+            stored_execution.get("manifest")
+            or {"enabled": True, "directory": str(parsed.manifest_dir)}
+        )
+        current_execution["resume"] = {
+            "stage": args.stage,
+            "failed_only": args.failed_only,
+        }
+        forwarded = argparse.Namespace(
+            config=args.config,
+            work_id=str(manifest.get("work_id") or ""),
+            chapter_id=str(manifest.get("chapter_id") or ""),
+            input=str(manifest.get("chapter_path") or ""),
+            max_rework=None,
+            output=args.output,
+            metadata_output=args.metadata_output,
+            stream=args.stream,
+            verbose=args.verbose,
+            trace=args.trace,
+            run_id=args.run_id,
+            trace_dir=args.trace_dir,
+            resume_manifest=manifest,
+            resume_stage=args.stage,
+            resume_failed_only=args.failed_only,
+            execution_config_override=current_execution,
+        )
+        return cmd_translate_chapter(forwarded)
+    except (OSError, ValueError) as exc:
+        print(f"[错误] 恢复运行失败：{exc}", file=sys.stderr)
+        return 1
 
 
 def cmd_monitor(args: argparse.Namespace) -> int:
@@ -382,6 +489,38 @@ def build_parser() -> argparse.ArgumentParser:
         help="覆盖本次运行的追踪目录（供浏览器工作台后台任务使用）",
     )
     p_trans.set_defaults(func=cmd_translate_chapter)
+
+    p_resume = sub.add_parser(
+        "resume-run", parents=[common],
+        help="从运行 manifest 恢复，只重跑目标阶段失败或缺失的片段",
+    )
+    p_resume.add_argument("--run-id", required=True, help="要恢复的原运行 ID")
+    p_resume.add_argument(
+        "--stage", choices=("qa",), default="qa",
+        help="恢复起点（当前支持 qa）",
+    )
+    p_resume.add_argument(
+        "--failed-only",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="复用目标阶段成功 checkpoint；--no-failed-only 会重跑目标阶段全部片段",
+    )
+    p_resume.add_argument("--output", default=None, help="恢复后成品译文输出路径")
+    p_resume.add_argument(
+        "--metadata-output", default=None, help="恢复后运行元数据 JSON 路径"
+    )
+    p_resume.add_argument(
+        "--stream", action="store_true", help="实时显示各 Agent 的 LLM token 增量"
+    )
+    p_resume.add_argument(
+        "--verbose", action="store_true", help="显示节点、重试与路由等详细事件"
+    )
+    p_resume.add_argument(
+        "--trace", action=argparse.BooleanOptionalAction, default=None,
+        help="启用/关闭 JSONL 与 SQLite 追踪",
+    )
+    p_resume.add_argument("--trace-dir", default=None, help="覆盖本次追踪目录")
+    p_resume.set_defaults(func=cmd_resume_run)
 
     p_monitor = sub.add_parser(
         "monitor", parents=[common],

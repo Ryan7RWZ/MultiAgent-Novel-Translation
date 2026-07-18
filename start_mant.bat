@@ -28,14 +28,14 @@ if errorlevel 1 (
     exit /b 1
 )
 
-rem Refresh the persistent user variable when this process was started before setx/UI changes.
-if not defined AW4W_API_KEY (
-    for /f "delims=" %%K in ('powershell -NoProfile -Command "$v=[Environment]::GetEnvironmentVariable('AW4W_API_KEY','User'); if ($v) { $v }"') do set "AW4W_API_KEY=%%K"
+rem Refresh the persistent DeepSeek user variable when this process predates setx/UI changes.
+if not defined DEEPSEEK_API_KEY (
+    for /f "delims=" %%K in ('powershell -NoProfile -Command "$v=[Environment]::GetEnvironmentVariable('DEEPSEEK_API_KEY','User'); if ($v) { $v }"') do set "DEEPSEEK_API_KEY=%%K"
 )
-if defined AW4W_API_KEY (
-    echo [MANT] API key detected in the process environment.
+if defined DEEPSEEK_API_KEY (
+    echo [MANT] DeepSeek API key detected in the process environment.
 ) else (
-    echo [WARN] AW4W_API_KEY is not available; translation will use DRAFT fallback.
+    echo [WARN] DEEPSEEK_API_KEY is not available; translation will use DRAFT fallback.
 )
 
 if not "%~1"=="" (
