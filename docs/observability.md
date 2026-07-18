@@ -95,6 +95,7 @@ LangGraph / BaseAgent / LLMClient
 | Agent | `agent.started` / `agent.completed` / `agent.failed` |
 | LLM | `llm.started` / `llm.token` / `llm.retry` / `llm.completed` / `llm.failed` / `llm.fallback` |
 | 记忆 | `memory.retrieved` |
+| 分片流水线 | `segmentation.completed` / `segmentation.hard_split` / `stage.segment_completed` / `output.integrity_failed` / `qa.aggregated` |
 
 每条事件都含 `run_id`、递增 `sequence`、UTC 时间、work/chapter、node、agent、
 segment、round、tier、payload 和 metrics。`run_id` 可用 CLI `--run-id` 指定，
@@ -109,7 +110,11 @@ delta 就 yield 并发出 `llm.token`。`complete()` 通过收集该迭代器保
 - JSON Agent：逐增量只用于展示；必须等流结束后才统一解析 JSON，半截 JSON
   不进入业务状态。
 - 首 token 之前失败：按 provider 的 `max_retries` 指数退避，并发出 retry 事件。
-- 已输出部分文本后失败：不自动重试，避免“半截文本 + 重试全文”重复拼接。
+- `stream_complete()` 已输出部分文本后失败：停止当前流，不在同一迭代器内续接，
+  避免“半截文本 + 重试全文”进入同一业务结果。
+- 普通 Agent 使用的 `complete()` 会识别流中断和 `finish_reason=length`，丢弃
+  残稿并从头完整重试（默认 1 次）；重试仍不完整则返回空结果，由工作流按片
+  回退并记录 `segment_failures`。
 - SDK 内部重试关闭，只有项目这一层重试，确保 attempt 和耗时可解释。
 
 ## 5. 配置
@@ -136,6 +141,8 @@ observability:
 CLI `--stream`、`--verbose`、`--trace/--no-trace` 会覆盖对应的单次运行行为。
 `llm.providers.<tier>.stream_include_usage: true` 可请求兼容 provider 在流末返回
 精确 token usage；不兼容该参数的 provider 应保持默认 `false`。
+`llm.providers.<tier>.partial_retries` 控制非流式 Agent 对残稿的完整重试次数，
+默认 1。
 
 ## 6. 安全与容量
 

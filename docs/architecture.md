@@ -83,11 +83,16 @@ flowchart TB
 | --- | --- | --- | --- |
 | `work_id` | `str` | 入口 | 作品 ID（关联记忆层一切数据） |
 | `chapter_id` | `str` | 入口 | 章节 ID |
+| `source_text` | `str` | 入口 | 安全规范化后的无损章级原文 |
 | `segments` | `list[str]` | 入口 | 待译原文段列表（按段推进） |
+| `segment_meta` | `list[dict]` | 入口 | 定位、边界、哈希与相邻上下文；与 segments 等长 |
+| `segmentation_stats` | `dict` | 入口 | 预算、边界分布、硬切数和回拼校验统计 |
 | `glossary` | `dict` | 术语 Agent | 本章命中的术语映射 `{源术语: 译名}` |
-| `draft` | `str` | 翻译 / 审校 | 当前译稿（审校节点原地修订） |
-| `review_notes` | `list` | 审校 / QA | 批注列表；QA 判 fail 时追加结构化批注，作为回退返工的输入 |
-| `polished` | `str` | 润色 | 润色后的译稿 |
+| `draft_segments` / `draft` | `list[str]` / `str` | 翻译 | 分片初稿与确定性章级拼接结果 |
+| `review_notes` | `list` | 审校 / QA | 带 `segment_id` 的批注列表；QA 判 rework 时作为定点返工输入 |
+| `polished_segments` / `polished` | `list[str]` / `str` | 润色 | 分片润色稿与确定性章级拼接结果 |
+| `segment_failures` | `list[dict]` | 翻译 / 审校 / 润色 / QA | 分片失败与完整性告警；非空时章级 QA 不得放行 |
+| `segment_qa` | `list[dict]` | QA | 每片 QA 得分、裁决和明细 |
 | `qa_score` | `float` | QA 终审 | 质量分（0–10） |
 | `qa_verdict` | `str` | QA 终审 | `"pass"` / `"rework"` |
 | `rework_count` | `int` | 调度（条件边） | 当前回退返工次数 |
@@ -109,14 +114,17 @@ sequenceDiagram
     participant S as LangGraph 状态机
     participant M as MemoryHub
 
-    O->>G: 章节原文（segments）
+    O->>O: 机械切片 + token 预算 + 可逆性校验
+    O->>G: 无损章级 source_text
     G->>M: lookup_terms + 新术语抽取
     M-->>G: TermEntry / glossary
     G->>S: 写入 state.glossary
     loop 最多 max_rework+1 轮
         S->>M: search_tm / get_story_bible（注入上下文）
-        S->>S: 翻译 → 审校 → 润色
-        S->>S: QA 终审（打分 + 判决）
+        loop 每个 segment
+            S->>S: 翻译 → 审校 → 润色 → QA
+        end
+        S->>S: 按 token 权重归并 QA；任一分片失败则 rework
         alt qa_verdict == pass
             S-->>O: polished + qa_score
         else rework 且 rework_count < max_rework
@@ -131,12 +139,16 @@ sequenceDiagram
 ### 3.3 回环设计要点
 
 - **批注驱动返工**：QA 判 rework 时必须给出结构化批注（错误位置、类型、修改建议），追加到 `review_notes`；翻译节点在下一轮把批注作为硬约束注入 Prompt，而不是盲目重译。
+- **分片完整性**：`draft_segments` 与 `polished_segments` 必须和原文片段等长；
+  润色稿字符比例越界时只回退对应初稿。流中断或输出上限产生的残稿不得进入状态。
+- **确定性归并**：Editor 批注按 `segment_id` 合并；QA 章级分数按源片估算 token
+  加权，只有所有片均 pass 且 `segment_failures` 为空时才允许章级 pass。
 - **上限兜底**：`rework_count >= max_rework` 时强制放行并打 `needs_human_review` 标记，避免 LLM 间互相不认可导致的死循环与费用失控。上限默认值取配置 `workflow.max_rework`。
 - **回退落点**：当前设计回退到"翻译"节点（携带审校与 QA 的全部批注重译）；如实验表明重译不如定点修订，可在 M4 联调期改为回退到"审校"节点，状态机条件边留有此扩展点。
 
 ## 4. 协作控制层
 
-- **调度 Agent（orchestrator）**：不直接翻译，负责把"一部作品 × 一章"拆成 `AgentTask` 序列、控制段级并发、调用状态机、维护 `rework_count`、失败重试与降级（如某 Agent 异常时跳过润色直送 QA 并记录）。尽量用规则实现，仅在需要计划/排序时调用 fast 档模型。
+- **调度 Agent（orchestrator）**：不直接翻译。初始切片完全使用确定性规则，保留场景线、重复行和空白，并为每片生成定位与相邻上下文；再把片段拆成 `AgentTask` 序列、调用状态机和维护返工上限。完整算法与不变量见 [segmentation.md](./segmentation.md)。
 - **术语 Agent（terminologist）**：章节翻译前扫描原文，命中已有术语库（`lookup_terms`），并对疑似新术语做抽取与翻译，写入 `state.glossary` 与术语库（`record_terms`）。保证"同一作品内，先入库者为准"。
 
 各 Agent 的详细职责、输入输出契约与 Prompt 设计见 [agent-design.md](./agent-design.md)。
@@ -246,6 +258,8 @@ erDiagram
 | `memory.faiss_index_dir` | MemoryHub | FAISS 索引目录 |
 | `pipeline.raw_dir` / `pipeline.aligned_dir` / `pipeline.glossary_dir` | 管道四步 | 语料与产物目录 |
 | `workflow.max_rework` | 状态机入口 | QA 回退次数上限 |
+| `workflow.min_polished_segment_ratio` / `max_polished_segment_ratio` | 润色节点 | 分片润色稿相对初稿的完整性长度范围 |
+| `segmentation.*` | 调度 Agent | 机械初始切片的目标/最大/最小正文 token、相邻上下文预算与片数保护上限 |
 | `observability.*` | CLI / 可观测层 | 终端流式显示、JSONL/SQLite 路径、token 合批与本地监控地址 |
 
 约定：除 CLI/脚本入口外，所有模块通过构造参数接收配置字典，不直接读取配置文件。
@@ -256,6 +270,7 @@ erDiagram
 src/mant/
 ├── llm/            # LLMClient：fast/strong 双档，缺 key 返回 [DRAFT] 占位
 ├── agents/         # base.py（AgentTask/AgentResult/BaseAgent）+ 六个 Agent
+├── segmentation.py # 无 LLM 的结构/token 预算初始切片
 ├── workflow/       # state.py（TranslationState）+ LangGraph 图构建与条件边
 ├── observability/  # 类型化事件、终端/JSONL/SQLite sink、本地 SSE 监控页
 ├── memory/         # models.py（dataclass）+ MemoryHub 门面 + SQLite/FAISS 适配

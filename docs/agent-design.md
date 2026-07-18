@@ -47,7 +47,7 @@ class BaseAgent(ABC):
 
 | Agent | `agent` 名 | output 键 | 对应 state 字段 | 模型档 |
 | --- | --- | --- | --- | --- |
-| 调度 Agent | `orchestrator` | `plan: list[dict]`、`dispatch: dict` | （控制层，不入 state） | fast（或纯规则） |
+| 调度 Agent | `orchestrator` | `segments: list[str]`、`segment_meta: list[dict]`、`normalized_text: str`、`segmentation_stats: dict`、`plan: list[dict]`、`dispatch: dict` | `source_text`、`segments`、`segment_meta`、`segmentation_stats` | 纯规则（开放式计划可选 fast） |
 | 术语 Agent | `terminologist` | `glossary: dict[str, str]`、`new_terms: list[dict]` | `glossary` | fast |
 | 翻译 Agent | `translator` | `draft: str` | `draft` | strong |
 | 审校 Agent | `editor` | `review_notes: list[dict]` | `review_notes` | strong |
@@ -61,10 +61,10 @@ class BaseAgent(ABC):
 
 ### 3.1 调度 Agent（orchestrator）
 
-- **职责**：把"一部作品的一章"拆解为段级/章级任务序列；决定串行/并发；驱动 LangGraph 状态机；维护 `rework_count` 与 `max_rework` 兜底；异常降级（某 Agent 失败时跳步并标记）。
-- **输入**：作品/章节元信息 + 原始 `segments`。
-- **输出**：`plan`（步骤清单与依赖）、`dispatch`（当前派发给哪个 Agent、携带哪些 context 键）。
-- **实现策略**：**规则优先**——状态转移已由 LangGraph 条件边表达，调度只做参数化决策（并发度、是否提前终止、是否人工接管）；仅在需要"下一章优先级排序"等开放式判断时调用 fast 档模型。
+- **职责**：把整章原文机械切成可逆、受 token 预算约束的段级任务序列；决定串行/并发；驱动 LangGraph 状态机；维护 `rework_count` 与 `max_rework` 兜底。
+- **输入**：作品/章节元信息 + 完整章节原文。
+- **输出**：`segments`、不重复正文的 `segment_meta`、`normalized_text`、`segmentation_stats`，以及 `plan` 和 `dispatch`。
+- **实现策略**：初始切片完全不调用 LLM；按标题/场景/段落/句子/分句优先级和 token 预算做确定性动态规划，最后才硬切。详见 [segmentation.md](./segmentation.md)。状态转移由 LangGraph 条件边表达；仅在需要"下一章优先级排序"等开放式判断时调用 fast 档模型。
 - **Prompt 设计要点**：若启用 LLM 计划，要求只输出 JSON 计划，禁止自由文本；输入含当前 `rework_count / max_rework`，输出含明确的 `next_node` 与理由。
 
 ### 3.2 术语 Agent（terminologist）
@@ -82,7 +82,7 @@ class BaseAgent(ABC):
 ### 3.3 翻译 Agent（translator）
 
 - **职责**：产出初译 `draft`；返工轮需携带 `review_notes` 批注做约束重译。
-- **输入**：`source_text`（当前段或若干段），`context.glossary / tm_matches / story_bible / prev_summary / review_notes / round`。
+- **输入**：`source_text`（当前待译核心片段），`context.glossary / tm_matches / story_bible / prev_summary / review_notes / round / context_before / context_after`；相邻上下文只供消歧，不得输出。
 - **输出**：`draft`。
 - **Prompt 设计要点**：
   - system 设定角色："资深网络小说译者，熟悉中文网文类型学（修仙/玄幻/都市等）与目标语读者习惯"；
@@ -96,6 +96,8 @@ class BaseAgent(ABC):
 - **职责**：对照原文逐段审校 `draft`，产出结构化问题清单；只管"对不对"，不直接改稿，修改由后续润色/返工执行。
 - **输入**：`source_text` = 原文段，`context` 携带 `draft`（从 state 注入）、`glossary`、`bible`。
 - **输出**：`review_notes`（每条含严重度、类型、位置与修改建议）。
+- **编排**：工作流逐 segment 调用，输出统一补 `segment_id/segment_index` 后归并；
+  JSON/schema 失败记入 `segment_failures`，不得当成“无问题”。
 - **检查清单（写入 Prompt）**：误译、漏译、增译；术语与 glossary 不一致；专名拼写前后不一；数字、方位、辈分、境界等级错误；事实与 bible 冲突。
 - **Prompt 设计要点**：要求先逐条核对清单再修订；批注用固定格式 `[类型] 位置说明：问题 → 建议`；无问题时返回原稿 + 空 notes；禁止做风格性改写。
 
@@ -104,6 +106,8 @@ class BaseAgent(ABC):
 - **职责**：在审校后的 `draft` 上做目标语润色，产出 `polished`；提升流畅度与文学性，**不得改动事实与术语**。
 - **输入**：`source_text` 可留原文段（供对照），`context` 携带 `draft`、`glossary`、`prev_segments`。
 - **输出**：`polished`。
+- **编排**：逐 segment 润色并与对应初稿做长度完整性检查；异常片回退初稿，
+  不允许一次章级输出覆盖或截断全部译文。
 - **Prompt 设计要点**：声明"只改表达，不改意思"；术语表内词条一字不许动；保持 POV、时态、段落划分与原文一致；网文特定要求（对白生动、战斗场面节奏、悬念句保留）。
 - **分档建议**：strong。若成本紧张，可降为 fast 做轻润色并在消融实验中量化差异。
 
@@ -112,6 +116,8 @@ class BaseAgent(ABC):
 - **职责**：对 `polished` 终审，给出 `qa_score`（0–10）与 `qa_verdict`；rework 时产出可执行的结构化批注驱动回退返工。
 - **输入**：`context` 携带原文、`polished`、`glossary`、`bible`。
 - **输出**：`qa_score`、`qa_verdict`、`qa_detail.suggestions`（并入 `review_notes` 供下一轮翻译使用）。
+- **编排**：逐 segment 独立 QA，章级分数按源片 token 加权；任一分片 rework、
+  解析失败或前序 `segment_failures` 非空时，章级裁决必须为 rework。
 - **评分量规（rubric，写入 Prompt）**：
 
   | 维度 | 权重 | 要点 |

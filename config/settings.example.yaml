@@ -11,10 +11,12 @@ llm:
       base_url: "https://api.openai.com/v1"
       model: "gpt-4o-mini"
       api_key_env: "OPENAI_API_KEY"   # key 从环境变量读取，禁止写入配置文件
+      partial_retries: 1               # 流中断/输出截断时丢弃残稿并完整重试
     strong:
       base_url: "https://api.openai.com/v1"
       model: "gpt-4o"
       api_key_env: "OPENAI_API_KEY"
+      partial_retries: 1
 
 memory:
   sqlite_path: "data/memory/mant.db"   # 术语库 / 翻译记忆库 TM（预留可切 Postgres）
@@ -28,6 +30,18 @@ pipeline:
 
 workflow:
   max_rework: 2                        # QA 不达标允许的最大回退返工次数
+  min_polished_segment_ratio: 0.5      # 润色稿过短时判不完整并回退该片初稿
+  max_polished_segment_ratio: 2.5      # 润色稿异常膨胀时判不完整并回退该片初稿
+
+# 在线翻译的初始切片完全由机械规则完成，不调用 LLM。
+# token 数是无供应商 tokenizer 时的保守估算；每片正文绝不超过 max_core_tokens。
+segmentation:
+  target_core_tokens: 900              # 动态规划优先靠近的正文片大小
+  max_core_tokens: 1200                # 单片正文硬上限
+  min_core_tokens: 250                 # 非末片的软下限，必要时允许更短
+  context_before_tokens: 160           # 仅供理解、不进入译文的相邻上文
+  context_after_tokens: 80             # 仅供理解、不进入译文的相邻下文
+  max_segments: 5000                   # 异常输入保护上限
 
 observability:
   enabled: true                        # 统一启用终端事件与运行追踪

@@ -187,6 +187,8 @@ def cmd_translate_chapter(args: argparse.Namespace) -> int:
             max_rework=max_rework,
             observer=observer,
             run_id=args.run_id,
+            segmentation_config=cfg.get("segmentation") or {},
+            workflow_config=cfg.get("workflow") or {},
         )
         output_path = Path(args.output) if args.output else _default_export_path(
             "multi_agent", args.work_id, args.chapter_id, ".txt"
@@ -207,6 +209,7 @@ def cmd_translate_chapter(args: argparse.Namespace) -> int:
             "chapter_id": args.chapter_id,
             "output": str(output_path),
             "segments": len(final.get("segments") or []),
+            "segmentation": final.get("segmentation_stats") or {},
             "qa_score": final.get("qa_score", 0.0),
             "qa_verdict": final.get("qa_verdict", ""),
             "rework_count": final.get("rework_count", 0),
@@ -216,6 +219,27 @@ def cmd_translate_chapter(args: argparse.Namespace) -> int:
                 for note in (final.get("review_notes") or [])
             ),
             "review_notes": final.get("review_notes") or [],
+            "segment_failures": final.get("segment_failures") or [],
+            "qa_segments": {
+                "count": len(final.get("segment_qa") or []),
+                "pass": sum(
+                    item.get("qa_verdict") == "pass"
+                    for item in (final.get("segment_qa") or [])
+                ),
+                "rework": sum(
+                    item.get("qa_verdict") == "rework"
+                    for item in (final.get("segment_qa") or [])
+                ),
+            },
+            "output_integrity": {
+                "draft_chars": len(str(final.get("draft") or "")),
+                "polished_chars": len(str(final.get("polished") or "")),
+                "polished_draft_ratio": round(
+                    len(str(final.get("polished") or ""))
+                    / max(1, len(str(final.get("draft") or ""))),
+                    4,
+                ),
+            },
             "runtime_notes": final.get("runtime_notes") or [],
             "observability_errors": (
                 list(observer.bus.errors) if observer is not None else []

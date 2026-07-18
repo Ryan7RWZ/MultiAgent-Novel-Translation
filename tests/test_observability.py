@@ -56,6 +56,99 @@ class FakeCompletions:
         )
 
 
+class PartialThenCompleteCompletions:
+    def __init__(self) -> None:
+        self.calls = 0
+
+    def create(self, **_):
+        self.calls += 1
+        if self.calls == 1:
+            def interrupted():
+                yield SimpleNamespace(
+                    choices=[SimpleNamespace(
+                        delta=SimpleNamespace(content="discard me"),
+                        finish_reason=None,
+                    )],
+                    usage=None,
+                )
+                raise TimeoutError("simulated partial stream timeout")
+
+            return interrupted()
+        return iter(
+            [
+                SimpleNamespace(
+                    choices=[SimpleNamespace(
+                        delta=SimpleNamespace(content="complete result"),
+                        finish_reason=None,
+                    )],
+                    usage=None,
+                ),
+                SimpleNamespace(
+                    choices=[SimpleNamespace(
+                        delta=SimpleNamespace(content=None),
+                        finish_reason="stop",
+                    )],
+                    usage=None,
+                ),
+            ]
+        )
+
+
+class TruncatedThenCompleteCompletions(PartialThenCompleteCompletions):
+    def create(self, **_):
+        self.calls += 1
+        if self.calls == 1:
+            return iter(
+                [
+                    SimpleNamespace(
+                        choices=[SimpleNamespace(
+                            delta=SimpleNamespace(content="truncated"),
+                            finish_reason=None,
+                        )],
+                        usage=None,
+                    ),
+                    SimpleNamespace(
+                        choices=[SimpleNamespace(
+                            delta=SimpleNamespace(content=None),
+                            finish_reason="length",
+                        )],
+                        usage=None,
+                    ),
+                ]
+            )
+        return iter(
+            [
+                SimpleNamespace(
+                    choices=[SimpleNamespace(
+                        delta=SimpleNamespace(content="complete result"),
+                        finish_reason="stop",
+                    )],
+                    usage=None,
+                )
+            ]
+        )
+
+
+class AlwaysPartialCompletions:
+    def __init__(self) -> None:
+        self.calls = 0
+
+    def create(self, **_):
+        self.calls += 1
+
+        def interrupted():
+            yield SimpleNamespace(
+                choices=[SimpleNamespace(
+                    delta=SimpleNamespace(content="never accept"),
+                    finish_reason=None,
+                )],
+                usage=None,
+            )
+            raise TimeoutError("simulated repeated timeout")
+
+        return interrupted()
+
+
 class TestObservability(unittest.TestCase):
     def test_llm_stream_yields_deltas_and_emits_typed_events(self) -> None:
         client = LLMClient.from_config(
@@ -88,6 +181,71 @@ class TestObservability(unittest.TestCase):
         self.assertEqual(event_types.count("llm.token"), 2)
         self.assertEqual(event_types[-1], "llm.completed")
         self.assertEqual([event.sequence for event in sink.events], list(range(1, 5)))
+
+    def test_complete_discards_partial_stream_and_retries_from_scratch(self) -> None:
+        client = LLMClient.from_config(
+            {"llm": {"providers": {"fast": {
+                "model": "fake",
+                "api_key": "not-a-real-key",
+                "max_retries": 0,
+                "partial_retries": 1,
+            }}}}
+        )
+        completions = PartialThenCompleteCompletions()
+        client._build_openai_client = lambda _: SimpleNamespace(  # type: ignore[method-assign]
+            chat=SimpleNamespace(completions=completions)
+        )
+        sink = CollectSink()
+        observer = RunObserver([sink])
+        with run_context(observer, run_id="partial-retry", work_id="demo", chapter_id="1"):
+            result = client.complete("system", "user")
+        observer.close()
+
+        self.assertEqual(result, "complete result")
+        self.assertEqual(completions.calls, 2)
+        self.assertFalse(client.last_call_incomplete)
+        self.assertTrue(any("已丢弃" in note for note in client.last_notes))
+        event_types = [event.event_type for event in sink.events]
+        self.assertEqual(event_types.count("llm.failed"), 1)
+        self.assertEqual(event_types.count("llm.retry"), 1)
+        self.assertEqual(event_types.count("llm.completed"), 1)
+
+    def test_complete_retries_finish_reason_length(self) -> None:
+        client = LLMClient.from_config(
+            {"llm": {"providers": {"fast": {
+                "model": "fake",
+                "api_key": "not-a-real-key",
+                "max_retries": 0,
+                "partial_retries": 1,
+            }}}}
+        )
+        completions = TruncatedThenCompleteCompletions()
+        client._build_openai_client = lambda _: SimpleNamespace(  # type: ignore[method-assign]
+            chat=SimpleNamespace(completions=completions)
+        )
+        result = client.complete("system", "user", max_tokens=10)
+        self.assertEqual(result, "complete result")
+        self.assertEqual(completions.calls, 2)
+        self.assertTrue(any("达到 max_tokens=10" in note for note in client.last_notes))
+
+    def test_complete_returns_empty_when_partial_retry_is_exhausted(self) -> None:
+        client = LLMClient.from_config(
+            {"llm": {"providers": {"fast": {
+                "model": "fake",
+                "api_key": "not-a-real-key",
+                "max_retries": 0,
+                "partial_retries": 1,
+            }}}}
+        )
+        completions = AlwaysPartialCompletions()
+        client._build_openai_client = lambda _: SimpleNamespace(  # type: ignore[method-assign]
+            chat=SimpleNamespace(completions=completions)
+        )
+        result = client.complete("system", "user")
+        self.assertEqual(result, "")
+        self.assertEqual(completions.calls, 2)
+        self.assertTrue(client.last_call_incomplete)
+        self.assertTrue(any("重试耗尽" in note for note in client.last_notes))
 
     def test_jsonl_batches_tokens_and_redacts_secrets(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -137,7 +295,7 @@ class TestObservability(unittest.TestCase):
         observer = RunObserver([sink])
         with tempfile.TemporaryDirectory() as tmp:
             chapter = Path(tmp) / "chapter.txt"
-            chapter.write_text("他拔出了剑。", encoding="utf-8")
+            chapter.write_text("他拔出了剑。\n他拔出了剑。", encoding="utf-8")
             final = run_chapter(
                 "demo",
                 chapter,
@@ -167,6 +325,16 @@ class TestObservability(unittest.TestCase):
         ]
         self.assertEqual(routes, ["rework", "end"])
         self.assertEqual(final["qa_verdict"], "pass")
+        self.assertTrue(
+            any(event.event_type == "segmentation.completed" for event in sink.events)
+        )
+        self.assertEqual(final["source_text"], "他拔出了剑。\n他拔出了剑。")
+        self.assertTrue(final["segmentation_stats"]["reconstruction_ok"])
+        self.assertEqual(len(final["draft_segments"]), len(final["segments"]))
+        self.assertEqual(len(final["polished_segments"]), len(final["segments"]))
+        self.assertTrue(
+            any(event.event_type == "qa.aggregated" for event in sink.events)
+        )
         self.assertEqual(sink.events[0].event_type, "run.started")
         self.assertEqual(sink.events[-1].event_type, "run.completed")
 
