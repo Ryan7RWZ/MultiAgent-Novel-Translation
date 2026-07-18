@@ -60,6 +60,14 @@ class RunObserver:
             self._sequence += 1
             return self._sequence
 
+    def continue_after(self, sequence: int) -> None:
+        """在发布首个事件前把序号推进到既有 trace 末尾。"""
+        parsed = max(0, int(sequence))
+        with self._lock:
+            if self._sequence:
+                raise RuntimeError("事件已经发布，不能再修改初始 sequence")
+            self._sequence = parsed
+
     def close(self) -> None:
         for sink in reversed(self._sinks):
             try:

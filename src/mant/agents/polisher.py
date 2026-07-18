@@ -57,6 +57,7 @@ class PolisherAgent(BaseAgent):
     temperature: float = 0.4
     #: 单次补全最大 token 数
     max_tokens: int = 4096
+    thinking: str | None = None
 
     # 系统提示词：定义润色师角色与红线规则。不含槽位。
     SYSTEM_PROMPT: str = """你是一名英文网络小说润色师，让译文读起来像英语母语者写的网文。
@@ -119,6 +120,7 @@ class PolisherAgent(BaseAgent):
                 user,
                 temperature=self.temperature,
                 max_tokens=self.max_tokens,
+                thinking=self.thinking,
             )
         except Exception as exc:  # noqa: BLE001 —— 骨架期统一降级，不向上抛
             notes.append(f"LLM 调用失败：{exc!r}")

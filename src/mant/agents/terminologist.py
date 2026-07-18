@@ -46,6 +46,10 @@ class TerminologistAgent(BaseAgent):
 
     #: 期望模型档位（结构化抽取，高频轻量调用）
     tier = "fast"
+    temperature: float = 0.2
+    max_tokens: int = 1024
+    structured_json: bool = True
+    thinking: str | None = None
 
     #: 支持的运行模式
     MODE_EXTRACT = "extract"
@@ -59,8 +63,8 @@ class TerminologistAgent(BaseAgent):
 法宝/器物名、势力/组织名、头衔/境界称谓及其他反复出现的专有名词。
 
 硬约束：
-1. 只输出 JSON 数组，禁止任何额外文本；无新术语时输出 []；
-2. 数组元素字段固定：{"source": 源术语, "target": 建议译名, "category": 类别, "confidence": 0~1}；
+1. 只输出紧凑 JSON 对象，禁止任何额外文本；无新术语时输出 {"terms": []}；
+2. 格式固定为 {"terms": [{"source": 源术语, "target": 建议译名, "category": 类别, "confidence": 0~1}]}；
 3. category 仅可取 person/place/skill/item/faction/title/other；
 4. 禁止臆造原文中不存在的术语；拿不准的译名给低 confidence。
 TODO: 补 2–3 组网文风格 few-shot（境界名、法宝名）。"""
@@ -104,41 +108,72 @@ TODO: 补 2–3 组网文风格 few-shot（境界名、法宝名）。"""
         notes: list[str] = []
         target_lang = str(task.context.get("target_lang", "English"))
 
-        # 0) 确定性命中已有术语。此路径不依赖 LLM，保证离线/无 key 模式下
-        # M1 沉淀的人工术语仍能进入本章 glossary。
-        known: dict[str, TermEntry] = {}
-        if self.memory is not None and hasattr(self.memory, "match_terms"):
-            try:
-                known = self.memory.match_terms(task.source_text, task.work_id)
-            except Exception as exc:  # noqa: BLE001
-                notes.append(f"match_terms 调用失败，跳过已有术语全文匹配：{exc!r}")
-        glossary: dict[str, str] = {
-            source: entry.target for source, entry in known.items() if entry.target
-        }
-
         # 1) LLM 抽取候选术语（JSON 数组；[DRAFT] 占位时走降级路径）
-        resp = self.complete(
+        resp = self.llm.complete(
+            self.SYSTEM_PROMPT,
             self.build_user_prompt(
                 self.USER_PROMPT_TEMPLATE,
                 target_lang=target_lang,
                 chapter_id=task.chapter_id,
                 source_text=task.source_text,
             ),
-            temperature=0.2,
+            temperature=self.temperature,
+            max_tokens=self.max_tokens,
+            response_format=(
+                {"type": "json_object"} if self.structured_json else None
+            ),
+            thinking=self.thinking,
         )
         notes.extend(self.llm.last_notes)
         parsed = self.parse_json_output(resp, notes)
-        candidates = self._parse_candidates(parsed, task.work_id, notes)
+        return self.reconcile_candidates(
+            task,
+            parsed,
+            notes=notes,
+            extraction_valid=parsed is not None,
+        )
+
+    def reconcile_candidates(
+        self,
+        task: AgentTask,
+        raw_candidates: Any,
+        *,
+        notes: list[str] | None = None,
+        extraction_valid: bool = True,
+    ) -> AgentResult:
+        """确定性去重候选，再与术语库仲裁并一次性写入。"""
+        collected_notes = list(notes or [])
+        parsed_candidates = self._parse_candidates(
+            raw_candidates, task.work_id, collected_notes
+        )
+        by_source: dict[str, TermEntry] = {}
+        for candidate in parsed_candidates:
+            previous = by_source.get(candidate.source)
+            if previous is None or candidate.confidence > previous.confidence:
+                by_source[candidate.source] = candidate
+        candidates = list(by_source.values())
+
+        # 确定性命中已有术语。此路径不依赖 LLM，保证离线术语仍能注入。
+        known: dict[str, TermEntry] = {}
+        if self.memory is not None and hasattr(self.memory, "match_terms"):
+            try:
+                known = self.memory.match_terms(task.source_text, task.work_id)
+            except Exception as exc:  # noqa: BLE001
+                collected_notes.append(
+                    f"match_terms 调用失败，跳过已有术语全文匹配：{exc!r}"
+                )
+        glossary: dict[str, str] = {
+            source: entry.target for source, entry in known.items() if entry.target
+        }
 
         if not candidates:
-            # 占位响应 / 解析失败 / 确实无新术语：仍返回确定性命中的已有术语。
-            notes.append(
+            collected_notes.append(
                 f"本轮未获得新术语候选；已从术语库直接命中 {len(glossary)} 条。"
             )
             return self._result(
-                ok=bool(glossary),
+                ok=extraction_valid or bool(glossary),
                 output={"glossary": glossary, "new_terms": []},
-                notes=notes,
+                notes=collected_notes,
             )
 
         # 2) 与库内条目比对（先入库者为准）
@@ -152,9 +187,13 @@ TODO: 补 2–3 组网文风格 few-shot（境界名、法宝名）。"""
                 )
                 existing.update(known)
             except Exception as exc:  # noqa: BLE001 —— 记忆层故障不阻断主流程
-                notes.append(f"lookup_terms 调用失败，跳过库内比对：{exc!r}")
+                collected_notes.append(
+                    f"lookup_terms 调用失败，跳过库内比对：{exc!r}"
+                )
         else:
-            notes.append("memory 为 None，候选术语全部视为新术语且不落库。")
+            collected_notes.append(
+                "memory 为 None，候选术语全部视为新术语且不落库。"
+            )
 
         for cand in candidates:
             hit = existing.get(cand.source)
@@ -175,32 +214,34 @@ TODO: 补 2–3 组网文风格 few-shot（境界名、法宝名）。"""
         if new_terms and self.memory is not None:
             try:
                 self.memory.record_terms(new_terms)
-                notes.append(f"新术语入库 {len(new_terms)} 条。")
+                collected_notes.append(f"新术语入库 {len(new_terms)} 条。")
             except Exception as exc:  # noqa: BLE001
-                notes.append(f"record_terms 调用失败，本轮新术语未持久化：{exc!r}")
-                notes.extend(arbitration)
+                collected_notes.append(
+                    f"record_terms 调用失败，本轮新术语未持久化：{exc!r}"
+                )
+                collected_notes.extend(arbitration)
                 return self._result(
                     ok=False,
                     output={
                         "glossary": glossary,
                         "new_terms": [asdict(t) for t in new_terms],
                     },
-                    notes=notes,
+                    notes=collected_notes,
                 )
 
-        notes.insert(
+        collected_notes.insert(
             0,
             f"术语扫描完成：候选 {len(candidates)} 条，新入库 {len(new_terms)} 条，"
             f"命中库内 {len(candidates) - len(new_terms)} 条。",
         )
-        notes.extend(arbitration)
+        collected_notes.extend(arbitration)
         return self._result(
             ok=True,
             output={
                 "glossary": glossary,
                 "new_terms": [asdict(t) for t in new_terms],
             },
-            notes=notes,
+            notes=collected_notes,
         )
 
     def _parse_candidates(
@@ -209,7 +250,10 @@ TODO: 补 2–3 组网文风格 few-shot（境界名、法宝名）。"""
         """把 JSON 解析结果规整为 ``TermEntry`` 列表（宽容处理脏数据）。"""
         if parsed is None:
             return []
-        items = parsed if isinstance(parsed, list) else [parsed]
+        if isinstance(parsed, dict) and isinstance(parsed.get("terms"), list):
+            items = parsed["terms"]
+        else:
+            items = parsed if isinstance(parsed, list) else [parsed]
         candidates: list[TermEntry] = []
         dropped = 0
         for item in items:

@@ -248,8 +248,10 @@ class TerminalSink:
                 if self._open_call != call_id:
                     if self._open_call:
                         print(file=self.stream)
+                    segment = event.segment_id or "chapter"
                     print(
-                        f"\n[{label} · {event.tier or 'default'}] ",
+                        f"\n[{label} · {segment} · r{event.round} · "
+                        f"{event.tier or 'default'}] ",
                         end="",
                         file=self.stream,
                         flush=True,

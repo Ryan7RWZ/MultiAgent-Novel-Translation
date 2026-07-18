@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import io
 import json
 import subprocess
 import tempfile
@@ -16,7 +17,7 @@ from mant.llm.client import LLMClient
 from mant.observability import RunObserver, run_context
 from mant.observability.events import RunEvent
 from mant.observability.dashboard import DASHBOARD_HTML, TranslationJobManager, _safe_id
-from mant.observability.sinks import JsonlSink, redact
+from mant.observability.sinks import JsonlSink, TerminalSink, redact
 from mant.workflow.graph import run_chapter
 from tests.test_workflow import ScriptedLLM
 
@@ -150,6 +151,45 @@ class AlwaysPartialCompletions:
 
 
 class TestObservability(unittest.TestCase):
+    def test_observer_can_continue_sequence_before_resume_events(self) -> None:
+        sink = CollectSink()
+        observer = RunObserver([sink])
+        observer.continue_after(41)
+        with run_context(observer, run_id="run-resume-sequence"):
+            from mant.observability import emit_event
+
+            emit_event("resume.started")
+        observer.close()
+
+        self.assertEqual(sink.events[0].sequence, 42)
+
+    def test_terminal_stream_labels_interleaved_segment_calls(self) -> None:
+        output = io.StringIO()
+        sink = TerminalSink(show_tokens=True, stream=output)
+        for sequence, call_id, segment_id, delta in (
+            (1, "call-a", "chapter#seg0000", "A"),
+            (2, "call-b", "chapter#seg0001", "B"),
+            (3, "call-a", "chapter#seg0000", "C"),
+        ):
+            sink(
+                RunEvent(
+                    run_id="run-terminal",
+                    sequence=sequence,
+                    timestamp="2026-01-01T00:00:00Z",
+                    event_type="llm.token",
+                    agent="translator",
+                    segment_id=segment_id,
+                    round=1,
+                    tier="strong",
+                    payload={"call_id": call_id, "delta": delta},
+                )
+            )
+        sink.close()
+
+        rendered = output.getvalue()
+        self.assertIn("translator · chapter#seg0000 · r1 · strong", rendered)
+        self.assertIn("translator · chapter#seg0001 · r1 · strong", rendered)
+
     def test_llm_stream_yields_deltas_and_emits_typed_events(self) -> None:
         client = LLMClient.from_config(
             {
@@ -169,11 +209,26 @@ class TestObservability(unittest.TestCase):
         observer = RunObserver([sink])
 
         with run_context(observer, run_id="run-test", work_id="demo", chapter_id="1"):
-            chunks = list(client.stream_complete("system", "user", max_tokens=20))
+            chunks = list(
+                client.stream_complete(
+                    "system",
+                    "user",
+                    max_tokens=20,
+                    response_format={"type": "json_object"},
+                    thinking="disabled",
+                )
+            )
         observer.close()
 
         self.assertEqual(chunks, ["Hello ", "world"])
         self.assertTrue(completions.request["stream"])
+        self.assertEqual(
+            completions.request["response_format"], {"type": "json_object"}
+        )
+        self.assertEqual(
+            completions.request["extra_body"],
+            {"thinking": {"type": "disabled"}},
+        )
         self.assertEqual(client.total_prompt_tokens, 7)
         self.assertEqual(client.total_completion_tokens, 2)
         event_types = [event.event_type for event in sink.events]
@@ -181,6 +236,28 @@ class TestObservability(unittest.TestCase):
         self.assertEqual(event_types.count("llm.token"), 2)
         self.assertEqual(event_types[-1], "llm.completed")
         self.assertEqual([event.sequence for event in sink.events], list(range(1, 5)))
+
+    def test_llm_semantic_config_never_contains_key_or_url_credentials(self) -> None:
+        client = LLMClient.from_config(
+            {
+                "llm": {
+                    "providers": {
+                        "fast": {
+                            "model": "fake",
+                            "base_url": "https://user:secret@example.test/v1?token=hidden",
+                            "api_key": "not-a-real-key",
+                            "api_key_env": "TEST_API_KEY",
+                        }
+                    }
+                }
+            }
+        )
+
+        rendered = json.dumps(client.semantic_config(include_all_tiers=True))
+        self.assertNotIn("not-a-real-key", rendered)
+        self.assertNotIn("secret", rendered)
+        self.assertNotIn("hidden", rendered)
+        self.assertIn("https://example.test/v1", rendered)
 
     def test_complete_discards_partial_stream_and_retries_from_scratch(self) -> None:
         client = LLMClient.from_config(
@@ -403,6 +480,9 @@ class TestObservability(unittest.TestCase):
         self.assertEqual(_safe_id("../../", fallback="safe"), "safe")
         self.assertIn('id="sourceText"', DASHBOARD_HTML)
         self.assertIn('id="fileInput"', DASHBOARD_HTML)
+        self.assertIn('id="callSelect"', DASHBOARD_HTML)
+        self.assertIn("agentTasks", DASHBOARD_HTML)
+        self.assertIn("callOrder", DASHBOARD_HTML)
         self.assertIn("/api/translate", DASHBOARD_HTML)
 
     def test_closing_dashboard_terminates_active_translation(self) -> None:

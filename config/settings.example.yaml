@@ -8,14 +8,14 @@ llm:
   # LLMClient 分 fast / strong 两档：高频轻量调用走 fast，质量敏感调用走 strong。
   providers:
     fast:
-      base_url: "https://api.openai.com/v1"
-      model: "gpt-4o-mini"
-      api_key_env: "OPENAI_API_KEY"   # key 从环境变量读取，禁止写入配置文件
+      base_url: "https://api.deepseek.com/v1"
+      model: "deepseek-v4-flash"
+      api_key_env: "DEEPSEEK_API_KEY" # key 从环境变量读取，禁止写入配置文件
       partial_retries: 1               # 流中断/输出截断时丢弃残稿并完整重试
     strong:
-      base_url: "https://api.openai.com/v1"
-      model: "gpt-4o"
-      api_key_env: "OPENAI_API_KEY"
+      base_url: "https://api.deepseek.com/v1"
+      model: "deepseek-v4-flash"
+      api_key_env: "DEEPSEEK_API_KEY"
       partial_retries: 1
 
 memory:
@@ -33,6 +33,27 @@ workflow:
   min_polished_segment_ratio: 0.5      # 润色稿过短时判不完整并回退该片初稿
   max_polished_segment_ratio: 2.5      # 润色稿异常膨胀时判不完整并回退该片初稿
 
+# 角色级生成参数会进入 checkpoint 语义指纹；修改后不会误复用旧结果。
+agents:
+  terminologist:
+    thinking: disabled                  # DeepSeek 结构化抽取不需要思考模式
+  translator:
+    thinking: disabled                  # 翻译正文不输出/计费长推理
+  editor:
+    temperature: 0.0
+    max_tokens: 1536
+    structured_json: true
+    thinking: disabled
+  polisher:
+    thinking: disabled
+  qa:
+    temperature: 0.0
+    max_tokens: 768                    # QA 只需紧凑 JSON，避免长推理耗尽输出
+    structured_json: true              # 向兼容端点请求 JSON object 模式
+    repair_attempts: 1                 # schema 无效时最多做一次短 JSON 修复
+    repair_max_tokens: 384
+    thinking: disabled
+
 # 在线翻译的初始切片完全由机械规则完成，不调用 LLM。
 # token 数是无供应商 tokenizer 时的保守估算；每片正文绝不超过 max_core_tokens。
 segmentation:
@@ -42,6 +63,31 @@ segmentation:
   context_before_tokens: 160           # 仅供理解、不进入译文的相邻上文
   context_after_tokens: 80             # 仅供理解、不进入译文的相邻下文
   max_segments: 5000                   # 异常输入保护上限
+
+# 切片间有界并发。正式启用前先用小文本验证供应商限流与费用预算。
+concurrency:
+  enabled: false                       # 默认保持串行；验证后再开启
+  global_max_in_flight: 4              # 全局最大在途片段任务
+  stages:
+    terminology: 2
+    translate: 4
+    edit: 4
+    polish: 6
+    qa: 4
+  budget:
+    max_segment_calls: 0               # 0 表示不限；生产环境应设硬上限
+    max_failures: 0                    # 全局上限；0 表示不限
+    max_failures_per_stage:            # 独立熔断，避免上游失败挤占 QA 额度
+      translate: 8
+      edit: 8
+      polish: 8
+      qa: 20
+  checkpoint:
+    enabled: false
+    sqlite_path: "data/runtime/checkpoints.db"
+  manifest:
+    enabled: false                     # 正式启用 checkpoint 时建议同时开启
+    directory: "data/runtime/runs"     # 保存恢复所需状态；该目录已被 gitignore
 
 observability:
   enabled: true                        # 统一启用终端事件与运行追踪

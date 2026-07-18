@@ -10,7 +10,7 @@
 - ``langgraph`` 为第三方依赖，**延迟导入**（仅在 ``build_graph`` 内 import）：
   未安装时 ``import mant.workflow.graph`` 不报错，``build_graph`` 抛出
   带安装提示的 ``ImportError``；
-- 四个业务 Agent 按同一 segment 序列执行，output 键契约如下：
+- 五个业务 Agent 按同一 segment 序列执行，output 键契约如下：
     - ``TranslatorAgent``：``{"draft": str}``；context 键 ``glossary`` /
       ``story_bible`` / ``tm_matches`` / ``prev_summary``；
     - ``EditorAgent``：``{"review_notes": list[dict]}``（只提意见不改稿）；
@@ -25,22 +25,26 @@
 TODO（待团队同步）：
 - 回退落点当前固定为 translate（docs §3.3 预留改回 edit 的扩展点）；
 - ``review_notes`` 按轮次标记/清理已解决批注，避免历史批注无限累积。
-- 大量 segment 当前顺序执行；后续需在供应商限流约束下实现有界并发和断点续跑。
+- Terminologist 已按正文片段抽取并确定性归并；跨章全局别名仲裁仍待完善。
 """
 
 from __future__ import annotations
 
+import hashlib
+import json
+import threading
 import time
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Mapping
 
-from mant.agents.base import AgentTask, BaseAgent
+from mant.agents.base import AgentResult, AgentTask, BaseAgent
 from mant.agents.editor import EditorAgent
 from mant.agents.orchestrator import OrchestratorAgent
 from mant.agents.polisher import PolisherAgent
 from mant.agents.qa import QAAgent
 from mant.agents.terminologist import TerminologistAgent
 from mant.agents.translator import TranslatorAgent
+from mant.execution import ExecutionConfig, RunManifestStore, StageExecutor, StageTask
 from mant.observability import emit_event, event_scope, run_context
 from mant.workflow.state import DEFAULT_MAX_REWORK, TranslationState, init_state
 
@@ -56,27 +60,32 @@ _REWORK_VERDICTS = ("rework", "fail")
 
 #: 主链路业务 Agent：节点角色 → 类
 _AGENT_CLASSES: dict[str, type[BaseAgent]] = {
+    "terminologist": TerminologistAgent,
     "translator": TranslatorAgent,
     "editor": EditorAgent,
     "polisher": PolisherAgent,
     "qa": QAAgent,
 }
 
+_STAGE_TO_ROLE = {
+    "terminology": "terminologist",
+    "translate": "translator",
+    "edit": "editor",
+    "polish": "polisher",
+    "qa": "qa",
+}
 
-def _pick_client(llm: "LLMClient", agent_cls: type[BaseAgent]) -> "LLMClient":
+
+def _pick_client(
+    llm: "LLMClient",
+    agent_cls: type[BaseAgent],
+    tier_override: str | None = None,
+) -> "LLMClient":
     """按 Agent 声明的 ``tier`` 类属性选档（docs/agent-design.md §4）。"""
-    tier = getattr(agent_cls, "tier", None)
+    tier = tier_override or getattr(agent_cls, "tier", None)
     if tier and hasattr(llm, "with_tier"):
         return llm.with_tier(tier)
     return llm
-
-
-def _build_agents(llm: "LLMClient", memory: "MemoryHub | None") -> dict[str, BaseAgent]:
-    """实例化主链路四个业务 Agent（各自按 tier 选档后的客户端）。"""
-    return {
-        role: agent_cls(_pick_client(llm, agent_cls), memory)
-        for role, agent_cls in _AGENT_CLASSES.items()
-    }
 
 
 def _resolve_limit(state: TranslationState, fallback: int) -> int:
@@ -130,6 +139,66 @@ def _segment_failure(
     }
 
 
+def _stable_hash(value: Any) -> str:
+    """为 checkpoint 生成稳定输入指纹；不把正文写入事件或键名。"""
+    encoded = json.dumps(
+        value,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+        default=str,
+    ).encode("utf-8")
+    return hashlib.sha256(encoded).hexdigest()
+
+
+def _selected_indices(state: TranslationState) -> list[int]:
+    """首轮处理全部片段；返工轮只处理 QA/完整性标记的片段。"""
+    all_indices = list(range(len(state.get("segments") or [])))
+    verdict = str(state.get("qa_verdict", "")).strip().lower()
+    if verdict not in _REWORK_VERDICTS:
+        return all_indices
+    selected = {
+        int(index)
+        for index in (state.get("rework_segment_indices") or [])
+        if isinstance(index, int) or str(index).isdigit()
+    }
+    valid = sorted(index for index in selected if 0 <= index < len(all_indices))
+    return valid or all_indices
+
+
+def _prepare_resume_state(
+    state: Mapping[str, Any],
+    *,
+    run_id: str,
+    start_stage: str,
+) -> TranslationState:
+    """清理目标阶段的旧派生产物，同时保留可复用的上游状态。"""
+    if start_stage != "qa":
+        raise ValueError("当前定向恢复只支持 qa 阶段")
+    prepared = dict(state)
+    current_round = int(prepared.get("rework_count", 0) or 0)
+    prepared["run_id"] = run_id
+    prepared["qa_score"] = 0.0
+    prepared["qa_verdict"] = ""
+    prepared["rework_segment_indices"] = []
+    prepared["execution_stats"] = {}
+    prepared["segment_failures"] = [
+        dict(item)
+        for item in (prepared.get("segment_failures") or [])
+        if isinstance(item, dict) and item.get("stage") != "qa"
+    ]
+    prepared["review_notes"] = [
+        item
+        for item in (prepared.get("review_notes") or [])
+        if not (
+            isinstance(item, dict)
+            and item.get("issue_type") == "qa"
+            and int(item.get("created_round", -1) or 0) == current_round
+        )
+    ]
+    return prepared  # type: ignore[return-value]
+
+
 def build_graph(
     llm: "LLMClient",
     memory: "MemoryHub | None",
@@ -137,6 +206,10 @@ def build_graph(
     *,
     min_polished_segment_ratio: float = 0.5,
     max_polished_segment_ratio: float = 2.5,
+    execution_config: Mapping[str, Any] | None = None,
+    agent_config: Mapping[str, Any] | None = None,
+    start_stage: str = "retrieve",
+    cancel_event: threading.Event | None = None,
 ) -> Any:
     """构建并编译单章翻译状态机。
 
@@ -161,8 +234,129 @@ def build_graph(
             "构建翻译工作流需要 langgraph，请先安装：pip install langgraph"
         ) from exc
 
-    agents = _build_agents(llm, memory)
-    terminologist = TerminologistAgent(_pick_client(llm, TerminologistAgent), memory)
+    execution = ExecutionConfig.from_mapping(execution_config)
+    executor = StageExecutor(execution, cancel_event=cancel_event)
+    agent_options = {
+        str(role): dict(options)
+        for role, options in dict(agent_config or {}).items()
+        if isinstance(options, Mapping)
+    }
+    allowed_agent_options = {
+        "tier",
+        "temperature",
+        "max_tokens",
+        "structured_json",
+        "thinking",
+        "repair_attempts",
+        "repair_max_tokens",
+    }
+
+    def options_for(role: str) -> dict[str, Any]:
+        options = agent_options.get(role, {})
+        unknown = sorted(set(options) - allowed_agent_options)
+        if unknown:
+            raise ValueError(f"Agent {role!r} 含未知配置：{', '.join(unknown)}")
+        return options
+
+    def client_for(role: str, agent_cls: type[BaseAgent]) -> "LLMClient":
+        tier = str(options_for(role).get("tier") or "") or None
+        return _pick_client(llm, agent_cls, tier)
+
+    def configure_agent(agent: BaseAgent, role: str) -> BaseAgent:
+        for key, value in options_for(role).items():
+            if key in {"tier", "thinking"}:
+                if key == "thinking" and str(value) not in {"enabled", "disabled"}:
+                    raise ValueError("thinking 只能为 enabled 或 disabled")
+                setattr(agent, key, str(value))
+            elif key in {"max_tokens", "repair_attempts", "repair_max_tokens"}:
+                parsed = int(value)
+                if key.endswith("tokens") and parsed < 1:
+                    raise ValueError(f"Agent {role!r} 的 {key} 必须至少为 1")
+                if key == "repair_attempts" and parsed < 0:
+                    raise ValueError("repair_attempts 不能小于 0")
+                setattr(agent, key, parsed)
+            elif key == "temperature":
+                parsed_float = float(value)
+                if not 0 <= parsed_float <= 2:
+                    raise ValueError("temperature 必须位于 [0, 2] 区间")
+                setattr(agent, key, parsed_float)
+            else:
+                setattr(agent, key, bool(value))
+        return agent
+
+    def new_agent(role: str) -> BaseAgent:
+        """每个任务创建独立 Agent/LLMClient，避免并发污染 last_* 状态。"""
+        agent_cls = _AGENT_CLASSES[role]
+        return configure_agent(agent_cls(client_for(role, agent_cls), None), role)
+
+    def client_semantics(client: Any) -> dict[str, Any]:
+        describe = getattr(client, "semantic_config", None)
+        if callable(describe):
+            return dict(describe())
+        return {
+            "tier": str(getattr(client, "tier", "") or ""),
+            "model": str(getattr(client, "model", "") or ""),
+        }
+
+    def agent_semantics(role: str, agent_cls: type[BaseAgent]) -> dict[str, Any]:
+        defaults = {
+            key: getattr(agent_cls, key)
+            for key in allowed_agent_options
+            if key != "tier" and hasattr(agent_cls, key)
+        }
+        defaults.update(options_for(role))
+        return {
+            "class": f"{agent_cls.__module__}.{agent_cls.__name__}",
+            "tier": str(
+                options_for(role).get("tier")
+                or getattr(agent_cls, "tier", "")
+            ),
+            "runtime": defaults,
+            "system_prompt": agent_cls.SYSTEM_PROMPT,
+            "user_prompt_template": str(
+                getattr(agent_cls, "USER_PROMPT_TEMPLATE", "")
+            ),
+            "json_repair_prompt": str(
+                getattr(agent_cls, "JSON_REPAIR_SYSTEM_PROMPT", "")
+            ),
+        }
+
+    def stage_task(
+        state: TranslationState,
+        *,
+        stage: str,
+        index: int,
+        round_no: int,
+        task: AgentTask,
+    ) -> StageTask:
+        role = _STAGE_TO_ROLE[stage]
+        agent_cls = _AGENT_CLASSES[role]
+        selected_client = client_for(role, agent_cls)
+        fingerprint = _stable_hash(
+            {
+                "fingerprint_version": 2,
+                "stage": stage,
+                "round": round_no,
+                "agent": agent_semantics(role, agent_cls),
+                "provider": client_semantics(selected_client),
+                "task": {
+                    "work_id": task.work_id,
+                    "chapter_id": task.chapter_id,
+                    "segment_id": task.segment_id,
+                    "source_text": task.source_text,
+                    "context": task.context,
+                },
+            }
+        )
+        return StageTask(
+            run_id=str(state.get("run_id") or "unscoped"),
+            segment_id=task.segment_id,
+            segment_index=index,
+            stage=stage,
+            round=round_no,
+            input_hash=fingerprint,
+        )
+
     min_polished_segment_ratio = float(min_polished_segment_ratio)
     max_polished_segment_ratio = float(max_polished_segment_ratio)
     if not 0 < min_polished_segment_ratio <= 1:
@@ -171,25 +365,90 @@ def build_graph(
         raise ValueError("max_polished_segment_ratio 必须至少为 1")
     if max_polished_segment_ratio < min_polished_segment_ratio:
         raise ValueError("润色稿最大长度比例不能小于最小比例")
+    if start_stage not in {"retrieve", "translate", "edit", "polish", "qa"}:
+        raise ValueError(f"不支持的工作流起始阶段：{start_stage!r}")
 
     # ------------------------------------------------------------------
-    # 节点定义（检索产物全部随 TranslationState 流转，可并发复用 compiled graph）
+    # 节点定义（检索产物全部随 TranslationState 流转；run_chapter 每次运行独立构图）
     # ------------------------------------------------------------------
     def retrieve_node(state: TranslationState) -> dict:
         """检索记忆注入：圣经 / TM / 运行说明与术语表均写入 state。"""
         runtime_notes: list[str] = []
         glossary: dict[str, Any] = dict(state.get("glossary") or {})
-        if memory is None:
-            runtime_notes.append("memory 为 None，跳过记忆检索注入（离线模式）")
-            term_result = terminologist.execute(
+
+        def extract_terminology(story_bible: Any) -> AgentResult:
+            agent_tasks: dict[int, AgentTask] = {}
+            stage_tasks: list[StageTask] = []
+            for idx, source in enumerate(state["segments"]):
+                agent_task = AgentTask(
+                    work_id=state["work_id"],
+                    chapter_id=state["chapter_id"],
+                    segment_id=_segment_id(state, idx),
+                    source_text=source,
+                    context={
+                        "mode": "extract",
+                        "story_bible": story_bible,
+                    },
+                )
+                agent_tasks[idx] = agent_task
+                stage_tasks.append(
+                    stage_task(
+                        state,
+                        stage="terminology",
+                        index=idx,
+                        round_no=0,
+                        task=agent_task,
+                    )
+                )
+            results = executor.run(
+                "terminology",
+                stage_tasks,
+                lambda scheduled: new_agent("terminologist").execute(
+                    agent_tasks[scheduled.segment_index]
+                ),
+            )
+            raw_candidates: list[dict[str, Any]] = []
+            successful_slices = 0
+            for scheduled in results:
+                if scheduled.value.ok:
+                    successful_slices += 1
+                raw_candidates.extend(
+                    item
+                    for item in (scheduled.value.output.get("new_terms") or [])
+                    if isinstance(item, dict)
+                )
+                runtime_notes.extend(
+                    note
+                    for note in scheduled.value.notes
+                    if "memory 为 None" not in note
+                )
+            reconciler = configure_agent(
+                TerminologistAgent(
+                    client_for("terminologist", TerminologistAgent), memory
+                ),
+                "terminologist",
+            )
+            reconciled = reconciler.reconcile_candidates(
                 AgentTask(
                     work_id=state["work_id"],
                     chapter_id=state["chapter_id"],
                     segment_id="chapter",
                     source_text=_source_text(state),
-                    context={"mode": "extract", "story_bible": None},
-                )
+                    context={"mode": "extract", "story_bible": story_bible},
+                ),
+                raw_candidates,
+                extraction_valid=successful_slices == len(stage_tasks),
             )
+            runtime_notes.append(
+                "术语分片抽取："
+                f"{successful_slices}/{len(stage_tasks)} 片有效，"
+                f"归并前候选 {len(raw_candidates)} 条。"
+            )
+            return reconciled
+
+        if memory is None:
+            runtime_notes.append("memory 为 None，跳过记忆检索注入（离线模式）")
+            term_result = extract_terminology(None)
             runtime_notes.extend(term_result.notes)
             glossary.update(term_result.output.get("glossary") or {})
             emit_event(
@@ -231,19 +490,8 @@ def build_graph(
             except Exception as exc:  # noqa: BLE001
                 runtime_notes.append(f"search_tm(seg#{idx}) 失败：{exc!r}")
 
-        # ③ 术语注入：术语 Agent（extract 模式）扫描整章 → 本章生效映射
-        term_result = terminologist.execute(
-            AgentTask(
-                work_id=work_id,
-                chapter_id=state["chapter_id"],
-                segment_id="chapter",  # 章级任务占位（docs §1 约定）
-                source_text=_source_text(state),
-                context={
-                    "mode": "extract",
-                    "story_bible": story_bible,
-                },
-            )
-        )
+        # ③ 术语注入：按正文机械片段并发抽取，再确定性去重和一次性入库。
+        term_result = extract_terminology(story_bible)
         runtime_notes.extend(term_result.notes)
         glossary.update(term_result.output.get("glossary") or {})
         emit_event(
@@ -272,14 +520,20 @@ def build_graph(
         runtime_notes = list(state.get("runtime_notes") or [])
         segment_meta = state.get("segment_meta") or []
         previous_parts = state.get("draft_segments") or []
-        parts: list[str] = []
+        parts = [
+            previous_parts[idx] if idx < len(previous_parts) else ""
+            for idx in range(len(state["segments"]))
+        ]
         failures: list[dict[str, Any]] = []
-        for idx, seg in enumerate(state["segments"]):
+        agent_tasks: dict[int, AgentTask] = {}
+        stage_tasks: list[StageTask] = []
+        for idx in _selected_indices(state):
+            seg = state["segments"][idx]
             meta = segment_meta[idx] if idx < len(segment_meta) else {}
             segment_id = str(
                 meta.get("segment_id") or f"{state['chapter_id']}#seg{idx:04d}"
             )
-            task = AgentTask(
+            agent_task = AgentTask(
                 work_id=state["work_id"],
                 chapter_id=state["chapter_id"],
                 segment_id=segment_id,
@@ -300,14 +554,36 @@ def build_graph(
                     "context_after": str(meta.get("context_after") or ""),
                 },
             )
-            result = agents["translator"].execute(task)
+            agent_tasks[idx] = agent_task
+            stage_tasks.append(
+                stage_task(
+                    state,
+                    stage="translate",
+                    index=idx,
+                    round_no=rework_count,
+                    task=agent_task,
+                )
+            )
+
+        results = executor.run(
+            "translate",
+            stage_tasks,
+            lambda scheduled: new_agent("translator").execute(
+                agent_tasks[scheduled.segment_index]
+            ),
+        )
+        for scheduled in results:
+            idx = scheduled.task.segment_index
+            seg = state["segments"][idx]
+            segment_id = scheduled.task.segment_id
+            result = scheduled.value
             runtime_notes.extend(result.notes)
             draft = str(result.output.get("draft") or "")
             if result.ok and draft.strip():
-                parts.append(draft)
+                parts[idx] = draft
             else:
                 fallback = previous_parts[idx] if idx < len(previous_parts) else seg
-                parts.append(fallback)
+                parts[idx] = fallback
                 failures.append(
                     _segment_failure(
                         stage="translate",
@@ -323,6 +599,7 @@ def build_graph(
                     "segment_index": idx,
                     "segment_count": len(state["segments"]),
                     "ok": result.ok and bool(draft.strip()),
+                    "from_checkpoint": scheduled.from_checkpoint,
                 },
             )
         return {
@@ -331,6 +608,7 @@ def build_graph(
             "segment_failures": failures,
             "rework_count": rework_count,
             "runtime_notes": runtime_notes,
+            "execution_stats": executor.stats(),
         }
 
     def edit_node(state: TranslationState) -> dict:
@@ -339,22 +617,46 @@ def build_graph(
         runtime_notes = list(state.get("runtime_notes") or [])
         merged = list(state.get("review_notes") or [])
         failures = list(state.get("segment_failures") or [])
-        for idx, source in enumerate(state["segments"]):
+        round_no = int(state.get("rework_count", 0))
+        agent_tasks: dict[int, AgentTask] = {}
+        stage_tasks: list[StageTask] = []
+        for idx in _selected_indices(state):
+            source = state["segments"][idx]
             segment_id = _segment_id(state, idx)
             draft = draft_parts[idx] if idx < len(draft_parts) else ""
-            result = agents["editor"].execute(
-                AgentTask(
-                    work_id=state["work_id"],
-                    chapter_id=state["chapter_id"],
-                    segment_id=segment_id,
-                    source_text=source,
-                    context={
-                        "draft": draft,
-                        "glossary": state.get("glossary") or {},
-                        "round": int(state.get("rework_count", 0)),
-                    },
+            agent_task = AgentTask(
+                work_id=state["work_id"],
+                chapter_id=state["chapter_id"],
+                segment_id=segment_id,
+                source_text=source,
+                context={
+                    "draft": draft,
+                    "glossary": state.get("glossary") or {},
+                    "round": round_no,
+                },
+            )
+            agent_tasks[idx] = agent_task
+            stage_tasks.append(
+                stage_task(
+                    state,
+                    stage="edit",
+                    index=idx,
+                    round_no=round_no,
+                    task=agent_task,
                 )
             )
+
+        results = executor.run(
+            "edit",
+            stage_tasks,
+            lambda scheduled: new_agent("editor").execute(
+                agent_tasks[scheduled.segment_index]
+            ),
+        )
+        for scheduled in results:
+            idx = scheduled.task.segment_index
+            segment_id = scheduled.task.segment_id
+            result = scheduled.value
             runtime_notes.extend(result.notes)
             if not result.ok:
                 failures.append(
@@ -379,12 +681,14 @@ def build_graph(
                     "segment_index": idx,
                     "segment_count": len(state["segments"]),
                     "ok": result.ok,
+                    "from_checkpoint": scheduled.from_checkpoint,
                 },
             )
         return {
             "review_notes": merged,
             "segment_failures": failures,
             "runtime_notes": runtime_notes,
+            "execution_stats": executor.stats(),
         }
 
     def polish_node(state: TranslationState) -> dict:
@@ -392,24 +696,53 @@ def build_graph(
         draft_parts = state.get("draft_segments") or []
         runtime_notes = list(state.get("runtime_notes") or [])
         failures = list(state.get("segment_failures") or [])
-        polished_parts: list[str] = []
+        previous_polished = state.get("polished_segments") or []
+        polished_parts = [
+            previous_polished[idx] if idx < len(previous_polished) else ""
+            for idx in range(len(state["segments"]))
+        ]
         all_notes = list(state.get("review_notes") or [])
-        for idx, source in enumerate(state["segments"]):
+        round_no = int(state.get("rework_count", 0))
+        agent_tasks: dict[int, AgentTask] = {}
+        stage_tasks: list[StageTask] = []
+        for idx in _selected_indices(state):
+            source = state["segments"][idx]
             segment_id = _segment_id(state, idx)
             draft = draft_parts[idx] if idx < len(draft_parts) else ""
-            result = agents["polisher"].execute(
-                AgentTask(
-                    work_id=state["work_id"],
-                    chapter_id=state["chapter_id"],
-                    segment_id=segment_id,
-                    source_text=source,
-                    context={
-                        "draft": draft,
-                        "review_notes": _notes_for_segment(all_notes, segment_id, idx),
-                        "round": int(state.get("rework_count", 0)),
-                    },
+            agent_task = AgentTask(
+                work_id=state["work_id"],
+                chapter_id=state["chapter_id"],
+                segment_id=segment_id,
+                source_text=source,
+                context={
+                    "draft": draft,
+                    "review_notes": _notes_for_segment(all_notes, segment_id, idx),
+                    "round": round_no,
+                },
+            )
+            agent_tasks[idx] = agent_task
+            stage_tasks.append(
+                stage_task(
+                    state,
+                    stage="polish",
+                    index=idx,
+                    round_no=round_no,
+                    task=agent_task,
                 )
             )
+
+        results = executor.run(
+            "polish",
+            stage_tasks,
+            lambda scheduled: new_agent("polisher").execute(
+                agent_tasks[scheduled.segment_index]
+            ),
+        )
+        for scheduled in results:
+            idx = scheduled.task.segment_index
+            segment_id = scheduled.task.segment_id
+            draft = draft_parts[idx] if idx < len(draft_parts) else ""
+            result = scheduled.value
             runtime_notes.extend(result.notes)
             candidate = str(result.output.get("polished") or "")
             ratio = len(candidate.strip()) / max(1, len(draft.strip()))
@@ -425,9 +758,9 @@ def build_graph(
                 )
             )
             if complete:
-                polished_parts.append(candidate)
+                polished_parts[idx] = candidate
             else:
-                polished_parts.append(draft)
+                polished_parts[idx] = draft
                 reason = (
                     "润色调用失败或返回空结果"
                     if not candidate.strip()
@@ -458,6 +791,7 @@ def build_graph(
                     "segment_index": idx,
                     "segment_count": len(state["segments"]),
                     "ok": complete,
+                    "from_checkpoint": scheduled.from_checkpoint,
                 },
             )
         return {
@@ -465,6 +799,7 @@ def build_graph(
             "polished": "\n\n".join(polished_parts),
             "segment_failures": failures,
             "runtime_notes": runtime_notes,
+            "execution_stats": executor.stats(),
         }
 
     def qa_node(state: TranslationState) -> dict:
@@ -474,31 +809,60 @@ def build_graph(
         runtime_notes = list(state.get("runtime_notes") or [])
         merged = list(state.get("review_notes") or [])
         failures = list(state.get("segment_failures") or [])
-        qa_segments: list[dict[str, Any]] = []
-        weighted_score = 0.0
-        total_weight = 0
-        all_pass = True
-        for idx, source in enumerate(state["segments"]):
+        previous_qa = {
+            int(item.get("segment_index")): dict(item)
+            for item in (state.get("segment_qa") or [])
+            if isinstance(item, dict) and isinstance(item.get("segment_index"), int)
+        }
+        round_no = int(state.get("rework_count", 0))
+        active_indices = set(_selected_indices(state))
+        active_indices.update(
+            idx for idx in range(len(state["segments"])) if idx not in previous_qa
+        )
+        agent_tasks: dict[int, AgentTask] = {}
+        stage_tasks: list[StageTask] = []
+        for idx in sorted(active_indices):
+            source = state["segments"][idx]
             segment_id = _segment_id(state, idx)
             polished = (
                 polished_parts[idx]
                 if idx < len(polished_parts)
                 else (draft_parts[idx] if idx < len(draft_parts) else "")
             )
-            result = agents["qa"].execute(
-                AgentTask(
-                    work_id=state["work_id"],
-                    chapter_id=state["chapter_id"],
-                    segment_id=segment_id,
-                    source_text=source,
-                    context={
-                        "polished": polished,
-                        "glossary": state.get("glossary") or {},
-                        "review_notes": _notes_for_segment(merged, segment_id, idx),
-                        "round": int(state.get("rework_count", 0)),
-                    },
+            agent_task = AgentTask(
+                work_id=state["work_id"],
+                chapter_id=state["chapter_id"],
+                segment_id=segment_id,
+                source_text=source,
+                context={
+                    "polished": polished,
+                    "glossary": state.get("glossary") or {},
+                    "review_notes": _notes_for_segment(merged, segment_id, idx),
+                    "round": round_no,
+                },
+            )
+            agent_tasks[idx] = agent_task
+            stage_tasks.append(
+                stage_task(
+                    state,
+                    stage="qa",
+                    index=idx,
+                    round_no=round_no,
+                    task=agent_task,
                 )
             )
+
+        results = executor.run(
+            "qa",
+            stage_tasks,
+            lambda scheduled: new_agent("qa").execute(
+                agent_tasks[scheduled.segment_index]
+            ),
+        )
+        for scheduled in results:
+            idx = scheduled.task.segment_index
+            segment_id = scheduled.task.segment_id
+            result = scheduled.value
             runtime_notes.extend(result.notes)
             out = result.output
             try:
@@ -511,27 +875,18 @@ def build_graph(
             if segment_verdict not in ("pass", "rework"):
                 segment_verdict = "rework"
             detail = out.get("qa_detail") if isinstance(out.get("qa_detail"), dict) else {}
-            qa_segments.append(
-                {
-                    "segment_id": segment_id,
-                    "segment_index": idx,
-                    "qa_score": score,
-                    "qa_verdict": segment_verdict,
-                    "qa_detail": detail,
-                    "ok": result.ok,
-                }
-            )
-            weight = max(
-                1,
-                int(
-                    _segment_meta(state, idx).get("estimated_tokens")
-                    or len(source)
+            previous_qa[idx] = {
+                "segment_id": segment_id,
+                "segment_index": idx,
+                "qa_score": score,
+                "qa_verdict": segment_verdict,
+                "qa_detail": detail,
+                "ok": result.ok,
+                "error_type": (
+                    scheduled.error_type
+                    or ("AgentOutputInvalid" if not result.ok else "")
                 ),
-            )
-            weighted_score += score * weight
-            total_weight += weight
-            if not result.ok or segment_verdict != "pass":
-                all_pass = False
+            }
             if not result.ok:
                 failures.append(
                     _segment_failure(
@@ -550,6 +905,9 @@ def build_graph(
                         "suggestion": str(suggestion),
                         "segment_id": segment_id,
                         "segment_index": idx,
+                        "created_round": round_no,
+                        "status": "open",
+                        "scope": "segment",
                     }
                 )
             emit_event(
@@ -560,18 +918,80 @@ def build_graph(
                     "segment_count": len(state["segments"]),
                     "ok": result.ok,
                     "verdict": segment_verdict,
+                    "from_checkpoint": scheduled.from_checkpoint,
                 },
             )
 
-        score = round(weighted_score / total_weight, 2) if total_weight else 0.0
+        qa_segments = [
+            previous_qa[idx]
+            for idx in range(len(state["segments"]))
+            if idx in previous_qa
+        ]
+        weighted_score = 0.0
+        evaluated_weight = 0
+        total_weight = 0
+        evaluated_count = 0
+        pass_count = 0
+        failure_categories: dict[str, int] = {}
+        all_pass = True
+        for item in qa_segments:
+            idx = int(item["segment_index"])
+            source = state["segments"][idx]
+            score = float(item.get("qa_score", 0.0) or 0.0)
+            weight = max(
+                1,
+                int(
+                    _segment_meta(state, idx).get("estimated_tokens")
+                    or len(source)
+                ),
+            )
+            total_weight += weight
+            if item.get("ok"):
+                weighted_score += score * weight
+                evaluated_weight += weight
+                evaluated_count += 1
+                if item.get("qa_verdict") == "pass":
+                    pass_count += 1
+            else:
+                category = str(item.get("error_type") or "AgentOutputInvalid")
+                failure_categories[category] = failure_categories.get(category, 0) + 1
+            if not item.get("ok") or item.get("qa_verdict") != "pass":
+                all_pass = False
+
+        score = (
+            round(weighted_score / evaluated_weight, 2)
+            if evaluated_weight
+            else 0.0
+        )
+        qa_summary = {
+            "segment_count": len(state["segments"]),
+            "evaluated_count": evaluated_count,
+            "pass_count": pass_count,
+            "coverage": round(evaluated_count / max(1, len(state["segments"])), 4),
+            "token_coverage": round(evaluated_weight / max(1, total_weight), 4),
+            "pass_ratio": round(pass_count / max(1, evaluated_count), 4),
+            "failure_categories": failure_categories,
+        }
         verdict = "pass" if all_pass and not failures and qa_segments else "rework"
+        rework_indices = {
+            int(item["segment_index"])
+            for item in qa_segments
+            if not item.get("ok") or item.get("qa_verdict") != "pass"
+        }
+        rework_indices.update(
+            int(item["segment_index"])
+            for item in failures
+            if isinstance(item.get("segment_index"), int)
+        )
         emit_event(
             "qa.aggregated",
             payload={
                 "segment_count": len(qa_segments),
-                "pass_count": sum(
-                    item["qa_verdict"] == "pass" for item in qa_segments
-                ),
+                "pass_count": pass_count,
+                "evaluated_count": evaluated_count,
+                "coverage": qa_summary["coverage"],
+                "pass_ratio": qa_summary["pass_ratio"],
+                "failure_categories": failure_categories,
                 "failure_count": len(failures),
                 "verdict": verdict,
             },
@@ -587,10 +1007,13 @@ def build_graph(
         return {
             "qa_score": score,
             "qa_verdict": verdict,
+            "qa_summary": qa_summary,
             "review_notes": merged,
             "segment_failures": failures,
             "segment_qa": qa_segments,
+            "rework_segment_indices": sorted(rework_indices),
             "runtime_notes": runtime_notes,
+            "execution_stats": executor.stats(),
         }
 
     def _route_after_qa(state: TranslationState) -> str:
@@ -645,7 +1068,7 @@ def build_graph(
     graph.add_node("edit", _observed_node("edit", edit_node))
     graph.add_node("polish", _observed_node("polish", polish_node))
     graph.add_node("qa", _observed_node("qa", qa_node))
-    graph.set_entry_point("retrieve")
+    graph.set_entry_point(start_stage)
     graph.add_edge("retrieve", "translate")
     graph.add_edge("translate", "edit")
     graph.add_edge("edit", "polish")
@@ -669,6 +1092,11 @@ def run_chapter(
     run_id: str | None = None,
     segmentation_config: Mapping[str, Any] | None = None,
     workflow_config: Mapping[str, Any] | None = None,
+    execution_config: Mapping[str, Any] | None = None,
+    agent_config: Mapping[str, Any] | None = None,
+    resume_state: Mapping[str, Any] | None = None,
+    start_stage: str = "retrieve",
+    cancel_event: threading.Event | None = None,
 ) -> TranslationState:
     """便捷入口（骨架）：读章节文件 → 调度切分 → 跑状态机 → 返回最终状态。
 
@@ -684,8 +1112,8 @@ def run_chapter(
     - 从配置读取 ``workflow.max_rework`` 等参数（当前为显式参数/默认值）；
     - 终审通过后：``memory.update_story_bible`` 回写章节摘要、优质句对
       回写 TM（docs/architecture.md §3.2 时序）；
-    - 成品译文落盘（输出目录配置化）、运行日志与 token 成本统计；
-    - 进度回调、断点续跑与失败重试策略。
+    - 成品译文落盘（输出目录配置化）、可靠 token 成本统计；
+    - 在浏览器入口暴露主动取消和显式 resume 操作。
     """
     path = Path(chapter_path)
     resolved_chapter_id = chapter_id or path.stem
@@ -696,6 +1124,7 @@ def run_chapter(
     max_polished_ratio = float(
         workflow_options.get("max_polished_segment_ratio", 2.5)
     )
+    execution = ExecutionConfig.from_mapping(execution_config)
     started = time.perf_counter()
     with run_context(
         observer,
@@ -744,8 +1173,13 @@ def run_chapter(
                         )
                     },
                 )
+                event_type = (
+                    "resume.source_validated"
+                    if resume_state is not None
+                    else "segmentation.completed"
+                )
                 emit_event(
-                    "segmentation.completed",
+                    event_type,
                     payload={
                         "source_hash": segmentation.source_hash,
                         "config": segmentation.config.to_dict(),
@@ -767,16 +1201,41 @@ def run_chapter(
                 max_rework=max_rework,
                 min_polished_segment_ratio=min_polished_ratio,
                 max_polished_segment_ratio=max_polished_ratio,
+                execution_config=execution_config,
+                agent_config=agent_config,
+                start_stage=start_stage,
+                cancel_event=cancel_event,
             )
-            initial = init_state(
-                work_id=work_id,
-                chapter_id=resolved_chapter_id,
-                segments=segments,
-                max_rework=max_rework,
-                source_text=segmentation.normalized_text,
-                segment_meta=segmentation.metadata,
-                segmentation_stats=stats,
-            )
+            if resume_state is None:
+                initial = init_state(
+                    work_id=work_id,
+                    chapter_id=resolved_chapter_id,
+                    segments=segments,
+                    max_rework=max_rework,
+                    source_text=segmentation.normalized_text,
+                    segment_meta=segmentation.metadata,
+                    segmentation_stats=stats,
+                    run_id=active_run_id,
+                )
+            else:
+                if str(resume_state.get("work_id") or "") != work_id:
+                    raise ValueError("manifest 的 work_id 与恢复请求不一致")
+                if str(resume_state.get("chapter_id") or "") != resolved_chapter_id:
+                    raise ValueError("manifest 的 chapter_id 与恢复请求不一致")
+                if str(resume_state.get("source_text") or "") != segmentation.normalized_text:
+                    raise ValueError("原文已变化，拒绝使用旧运行 manifest 恢复")
+                initial = _prepare_resume_state(
+                    resume_state,
+                    run_id=active_run_id,
+                    start_stage=start_stage,
+                )
+                emit_event(
+                    "resume.started",
+                    payload={
+                        "stage": start_stage,
+                        "failed_only": execution.resume_failed_only,
+                    },
+                )
             final: TranslationState = app.invoke(initial)
         except Exception as exc:
             emit_event(
@@ -787,6 +1246,38 @@ def run_chapter(
                 },
             )
             raise
+        if execution.manifest_enabled:
+            try:
+                describe = getattr(llm, "semantic_config", None)
+                llm_settings = (
+                    dict(describe(include_all_tiers=True))
+                    if callable(describe)
+                    else {}
+                )
+                manifest_path = RunManifestStore(execution.manifest_dir).save(
+                    run_id=active_run_id,
+                    chapter_path=path,
+                    state=final,
+                    settings={
+                        "llm": llm_settings,
+                        "agents": dict(agent_config or {}),
+                        "workflow": workflow_options,
+                        "segmentation": dict(segmentation_config or {}),
+                        "execution": execution.to_dict(),
+                    },
+                )
+                emit_event(
+                    "manifest.saved",
+                    payload={"path": str(manifest_path)},
+                )
+            except Exception as exc:  # noqa: BLE001 - manifest 不覆盖已完成译文
+                final.setdefault("runtime_notes", []).append(
+                    f"运行 manifest 保存失败：{exc!r}"
+                )
+                emit_event(
+                    "manifest.failed",
+                    payload={"error": type(exc).__name__},
+                )
         emit_event(
             "run.completed",
             payload={
@@ -794,7 +1285,9 @@ def run_chapter(
                 "segments": len(final.get("segments") or []),
                 "qa_score": final.get("qa_score", 0.0),
                 "qa_verdict": final.get("qa_verdict", ""),
+                "qa_summary": final.get("qa_summary") or {},
                 "rework_count": final.get("rework_count", 0),
+                "execution": final.get("execution_stats") or {},
             },
             metrics={
                 "duration_ms": round((time.perf_counter() - started) * 1000, 2)
