@@ -1,4 +1,4 @@
-"""LangGraph 状态机：retrieve → 分片 translate/edit/polish/qa → 归并主链路。
+"""LangGraph 状态机：retrieve → translate/edit/revise/polish/qa → 归并主链路。
 
 回环（QA 返工）：``qa_verdict == "rework"`` 且 ``rework_count < max_rework``
 时，经条件边携带 ``review_notes`` 批注回退 translate 节点重译；否则进入 END。
@@ -15,8 +15,10 @@
       ``story_bible`` / ``tm_matches`` / ``prev_summary``；
     - ``EditorAgent``：``{"review_notes": list[dict]}``（只提意见不改稿）；
       context 键 ``draft``（必需）/ ``glossary``；
+    - ``TranslatorAgent`` 的 revision mode：``{"draft": str}``；只按 Editor
+      的事实性意见定点修订，不承担文学润色；
     - ``PolisherAgent``：``{"polished": str}``；context 键 ``draft``（必需）/
-      ``review_notes``；
+      语言层 ``review_notes``；
     - ``QAAgent``：``{"qa_score": float, "qa_verdict": "pass"|"rework",
       "qa_detail": dict}``（``qa_detail.suggestions`` 为返工建议，并入
       ``review_notes`` 驱动下一轮重译）；章级分数由工作流按源片 token 加权；
@@ -24,7 +26,6 @@
 
 TODO（待团队同步）：
 - 回退落点当前固定为 translate（docs §3.3 预留改回 edit 的扩展点）；
-- ``review_notes`` 按轮次标记/清理已解决批注，避免历史批注无限累积。
 - Terminologist 已按正文片段抽取并确定性归并；跨章全局别名仲裁仍待完善。
 """
 
@@ -71,6 +72,7 @@ _STAGE_TO_ROLE = {
     "terminology": "terminologist",
     "translate": "translator",
     "edit": "editor",
+    "revise": "translator",
     "polish": "polisher",
     "qa": "qa",
 }
@@ -126,6 +128,51 @@ def _notes_for_segment(
         elif str(note_id or "") == segment_id or note_index == segment_index:
             selected.append(note)
     return selected
+
+
+_RESOLVED_NOTE_STATES = {"translation_applied", "revision_applied", "resolved"}
+_FACTUAL_ISSUE_TYPES = {
+    "omission",
+    "mistranslation",
+    "proper_noun",
+    "accuracy",
+    "terminology",
+    "qa",
+}
+
+
+def _pending_notes_for_segment(
+    notes: list[Any], segment_id: str, segment_index: int
+) -> list[Any]:
+    """返回当前片尚未落实的批注，避免旧意见在返工轮无限重复注入。"""
+    return [
+        note
+        for note in _notes_for_segment(notes, segment_id, segment_index)
+        if not isinstance(note, dict)
+        or str(note.get("resolution") or "pending") not in _RESOLVED_NOTE_STATES
+    ]
+
+
+def _needs_factual_revision(note: Any) -> bool:
+    """事实、专名或 high 问题必须经过定点修订；语言小问题留给 Polisher。"""
+    if not isinstance(note, dict):
+        return False
+    issue_type = str(note.get("issue_type") or "").strip().lower()
+    severity = str(note.get("severity") or "").strip().lower()
+    return issue_type in _FACTUAL_ISSUE_TYPES or severity == "high"
+
+
+def _language_notes_for_segment(
+    notes: list[Any], segment_id: str, segment_index: int
+) -> list[dict[str, Any]]:
+    """只把非 high 的语言类意见交给 Polisher，阻止其承担补译职责。"""
+    return [
+        note
+        for note in _pending_notes_for_segment(notes, segment_id, segment_index)
+        if isinstance(note, dict)
+        and str(note.get("issue_type") or "").strip().lower() == "other"
+        and str(note.get("severity") or "").strip().lower() != "high"
+    ]
 
 
 def _segment_failure(
@@ -213,7 +260,7 @@ def build_graph(
 ) -> Any:
     """构建并编译单章翻译状态机。
 
-    流程：retrieve（检索记忆注入）→ translate → edit → polish → qa；
+    流程：retrieve（检索记忆注入）→ translate → edit → revise → polish → qa；
     条件边：QA 判 ``rework`` 且未达上限 → 回 translate；否则 → END。
 
     参数:
@@ -249,6 +296,14 @@ def build_graph(
         "thinking",
         "repair_attempts",
         "repair_max_tokens",
+        "max_review_notes",
+        "max_span_chars",
+        "max_suggestion_chars",
+        "compact_recovery_attempts",
+        "compact_recovery_max_tokens",
+        "compact_recovery_max_notes",
+        "pass_score_threshold",
+        "min_dimension_score",
     }
 
     def options_for(role: str) -> dict[str, Any]:
@@ -268,17 +323,30 @@ def build_graph(
                 if key == "thinking" and str(value) not in {"enabled", "disabled"}:
                     raise ValueError("thinking 只能为 enabled 或 disabled")
                 setattr(agent, key, str(value))
-            elif key in {"max_tokens", "repair_attempts", "repair_max_tokens"}:
+            elif key in {
+                "max_tokens",
+                "repair_attempts",
+                "repair_max_tokens",
+                "max_review_notes",
+                "max_span_chars",
+                "max_suggestion_chars",
+                "compact_recovery_attempts",
+                "compact_recovery_max_tokens",
+                "compact_recovery_max_notes",
+            }:
                 parsed = int(value)
                 if key.endswith("tokens") and parsed < 1:
                     raise ValueError(f"Agent {role!r} 的 {key} 必须至少为 1")
-                if key == "repair_attempts" and parsed < 0:
-                    raise ValueError("repair_attempts 不能小于 0")
+                if key.endswith("attempts") and parsed < 0:
+                    raise ValueError(f"Agent {role!r} 的 {key} 不能小于 0")
+                if key not in {"repair_attempts", "compact_recovery_attempts"} and parsed < 1:
+                    raise ValueError(f"Agent {role!r} 的 {key} 必须至少为 1")
                 setattr(agent, key, parsed)
-            elif key == "temperature":
+            elif key in {"temperature", "pass_score_threshold", "min_dimension_score"}:
                 parsed_float = float(value)
-                if not 0 <= parsed_float <= 2:
-                    raise ValueError("temperature 必须位于 [0, 2] 区间")
+                upper = 2 if key == "temperature" else 10
+                if not 0 <= parsed_float <= upper:
+                    raise ValueError(f"Agent {role!r} 的 {key} 必须位于 [0, {upper}] 区间")
                 setattr(agent, key, parsed_float)
             else:
                 setattr(agent, key, bool(value))
@@ -312,13 +380,18 @@ def build_graph(
                 or getattr(agent_cls, "tier", "")
             ),
             "runtime": defaults,
-            "system_prompt": agent_cls.SYSTEM_PROMPT,
-            "user_prompt_template": str(
-                getattr(agent_cls, "USER_PROMPT_TEMPLATE", "")
-            ),
-            "json_repair_prompt": str(
-                getattr(agent_cls, "JSON_REPAIR_SYSTEM_PROMPT", "")
-            ),
+            "prompts": {
+                name: str(getattr(agent_cls, name, ""))
+                for name in (
+                    "SYSTEM_PROMPT",
+                    "USER_PROMPT_TEMPLATE",
+                    "JSON_REPAIR_SYSTEM_PROMPT",
+                    "COMPACT_RECOVERY_SYSTEM_PROMPT",
+                    "REVISION_SYSTEM_PROMPT",
+                    "REVISION_USER_PROMPT_TEMPLATE",
+                )
+                if hasattr(agent_cls, name)
+            },
         }
 
     def stage_task(
@@ -334,7 +407,7 @@ def build_graph(
         selected_client = client_for(role, agent_cls)
         fingerprint = _stable_hash(
             {
-                "fingerprint_version": 2,
+                "fingerprint_version": 3,
                 "stage": stage,
                 "round": round_no,
                 "agent": agent_semantics(role, agent_cls),
@@ -365,7 +438,14 @@ def build_graph(
         raise ValueError("max_polished_segment_ratio 必须至少为 1")
     if max_polished_segment_ratio < min_polished_segment_ratio:
         raise ValueError("润色稿最大长度比例不能小于最小比例")
-    if start_stage not in {"retrieve", "translate", "edit", "polish", "qa"}:
+    if start_stage not in {
+        "retrieve",
+        "translate",
+        "edit",
+        "revise",
+        "polish",
+        "qa",
+    }:
         raise ValueError(f"不支持的工作流起始阶段：{start_stage!r}")
 
     # ------------------------------------------------------------------
@@ -512,9 +592,16 @@ def build_graph(
 
     def translate_node(state: TranslationState) -> dict:
         """逐 segment 初译并拼接；返工轮携带批注并累计 rework_count。"""
-        notes = list(state.get("review_notes") or [])
+        notes = [
+            dict(note) if isinstance(note, dict) else note
+            for note in (state.get("review_notes") or [])
+        ]
         rework_count = int(state.get("rework_count", 0))
-        if str(state.get("qa_verdict", "")).strip().lower() in _REWORK_VERDICTS:
+        is_rework = (
+            str(state.get("qa_verdict", "")).strip().lower()
+            in _REWORK_VERDICTS
+        )
+        if is_rework:
             rework_count += 1  # 本轮由 QA 判返触发，记一次实际返工
         tm_matches = state.get("tm_matches") or []
         runtime_notes = list(state.get("runtime_notes") or [])
@@ -526,6 +613,7 @@ def build_graph(
         ]
         failures: list[dict[str, Any]] = []
         agent_tasks: dict[int, AgentTask] = {}
+        task_notes: dict[int, list[Any]] = {}
         stage_tasks: list[StageTask] = []
         for idx in _selected_indices(state):
             seg = state["segments"][idx]
@@ -533,6 +621,8 @@ def build_graph(
             segment_id = str(
                 meta.get("segment_id") or f"{state['chapter_id']}#seg{idx:04d}"
             )
+            pending_notes = _pending_notes_for_segment(notes, segment_id, idx)
+            task_notes[idx] = pending_notes
             agent_task = AgentTask(
                 work_id=state["work_id"],
                 chapter_id=state["chapter_id"],
@@ -547,7 +637,7 @@ def build_graph(
                     ],
                     "prev_summary": "",  # TODO: 由圣经 timeline/上一章摘要生成
                     # 返工批注由 TranslatorAgent 作为最高优先级硬约束消费
-                    "review_notes": _notes_for_segment(notes, segment_id, idx),
+                    "review_notes": pending_notes,
                     "round": rework_count,
                     # 仅作理解辅助，译者 Prompt 明确要求不得翻译或输出。
                     "context_before": str(meta.get("context_before") or ""),
@@ -581,6 +671,12 @@ def build_graph(
             draft = str(result.output.get("draft") or "")
             if result.ok and draft.strip():
                 parts[idx] = draft
+                if is_rework:
+                    for note in task_notes.get(idx, []):
+                        if isinstance(note, dict):
+                            note["resolution"] = "translation_applied"
+                            note["resolved_round"] = rework_count
+                            note["status"] = "addressed"
             else:
                 fallback = previous_parts[idx] if idx < len(previous_parts) else seg
                 parts[idx] = fallback
@@ -605,6 +701,7 @@ def build_graph(
         return {
             "draft": "\n\n".join(parts),
             "draft_segments": parts,
+            "review_notes": notes,
             "segment_failures": failures,
             "rework_count": rework_count,
             "runtime_notes": runtime_notes,
@@ -673,6 +770,11 @@ def build_graph(
                 }
                 note["segment_id"] = segment_id
                 note["segment_index"] = idx
+                note["source"] = "editor"
+                note["created_round"] = round_no
+                note["status"] = "open"
+                note["scope"] = "segment"
+                note["resolution"] = "pending"
                 merged.append(note)
             emit_event(
                 "stage.segment_completed",
@@ -691,9 +793,145 @@ def build_graph(
             "execution_stats": executor.stats(),
         }
 
+    def revise_node(state: TranslationState) -> dict:
+        """只对含事实性审校意见的片段定点修订；其余片段零调用沿用初稿。"""
+        draft_parts = state.get("draft_segments") or []
+        previous_parts = state.get("revised_segments") or []
+        revised_parts = [
+            previous_parts[idx]
+            if idx < len(previous_parts)
+            else (draft_parts[idx] if idx < len(draft_parts) else "")
+            for idx in range(len(state["segments"]))
+        ]
+        merged = [
+            dict(note) if isinstance(note, dict) else note
+            for note in (state.get("review_notes") or [])
+        ]
+        runtime_notes = list(state.get("runtime_notes") or [])
+        failures = list(state.get("segment_failures") or [])
+        round_no = int(state.get("rework_count", 0))
+        agent_tasks: dict[int, AgentTask] = {}
+        task_notes: dict[int, list[dict[str, Any]]] = {}
+        stage_tasks: list[StageTask] = []
+
+        for idx in _selected_indices(state):
+            source = state["segments"][idx]
+            segment_id = _segment_id(state, idx)
+            draft = draft_parts[idx] if idx < len(draft_parts) else ""
+            pending = [
+                note
+                for note in _pending_notes_for_segment(merged, segment_id, idx)
+                if _needs_factual_revision(note)
+            ]
+            if not pending:
+                revised_parts[idx] = draft
+                continue
+            meta = _segment_meta(state, idx)
+            task_notes[idx] = pending
+            agent_task = AgentTask(
+                work_id=state["work_id"],
+                chapter_id=state["chapter_id"],
+                segment_id=segment_id,
+                source_text=source,
+                context={
+                    "mode": "revision",
+                    "draft": draft,
+                    "review_notes": pending,
+                    "glossary": state.get("glossary") or {},
+                    "round": round_no,
+                    "context_before": str(meta.get("context_before") or ""),
+                    "context_after": str(meta.get("context_after") or ""),
+                },
+            )
+            agent_tasks[idx] = agent_task
+            stage_tasks.append(
+                stage_task(
+                    state,
+                    stage="revise",
+                    index=idx,
+                    round_no=round_no,
+                    task=agent_task,
+                )
+            )
+
+        results = executor.run(
+            "revise",
+            stage_tasks,
+            lambda scheduled: new_agent("translator").execute(
+                agent_tasks[scheduled.segment_index]
+            ),
+        )
+        for scheduled in results:
+            idx = scheduled.task.segment_index
+            segment_id = scheduled.task.segment_id
+            result = scheduled.value
+            runtime_notes.extend(result.notes)
+            candidate = str(result.output.get("draft") or "")
+            original_draft = (
+                draft_parts[idx] if idx < len(draft_parts) else ""
+            )
+            ratio = len(candidate.strip()) / max(1, len(original_draft.strip()))
+            draft_mode = candidate.lstrip().startswith("[DRAFT]")
+            complete = (
+                result.ok
+                and bool(candidate.strip())
+                and (draft_mode or ratio >= min_polished_segment_ratio)
+            )
+            if complete:
+                revised_parts[idx] = candidate
+                for note in task_notes.get(idx, []):
+                    note["resolution"] = "revision_applied"
+                    note["resolved_round"] = round_no
+                    note["status"] = "addressed"
+            else:
+                revised_parts[idx] = (
+                    draft_parts[idx] if idx < len(draft_parts) else ""
+                )
+                failures.append(
+                    _segment_failure(
+                        stage="revise",
+                        segment_id=segment_id,
+                        segment_index=idx,
+                        reason=(
+                            "定点修订调用失败、返回空结果或异常缩短，"
+                            "已保留修订前初稿"
+                        ),
+                    )
+                )
+                emit_event(
+                    "output.integrity_failed",
+                    payload={
+                        "stage": "revise",
+                        "segment_index": idx,
+                        "draft_chars": len(original_draft),
+                        "output_chars": len(candidate),
+                        "ratio": round(ratio, 4),
+                    },
+                )
+            emit_event(
+                "stage.segment_completed",
+                payload={
+                    "stage": "revise",
+                    "segment_index": idx,
+                    "segment_count": len(state["segments"]),
+                    "ok": complete,
+                    "from_checkpoint": scheduled.from_checkpoint,
+                },
+            )
+        return {
+            "revised_segments": revised_parts,
+            "revised": "\n\n".join(revised_parts),
+            "review_notes": merged,
+            "segment_failures": failures,
+            "runtime_notes": runtime_notes,
+            "execution_stats": executor.stats(),
+        }
+
     def polish_node(state: TranslationState) -> dict:
         """逐 segment 润色并做长度完整性检查；异常片回退对应初稿。"""
-        draft_parts = state.get("draft_segments") or []
+        draft_parts = (
+            state.get("revised_segments") or state.get("draft_segments") or []
+        )
         runtime_notes = list(state.get("runtime_notes") or [])
         failures = list(state.get("segment_failures") or [])
         previous_polished = state.get("polished_segments") or []
@@ -716,7 +954,9 @@ def build_graph(
                 source_text=source,
                 context={
                     "draft": draft,
-                    "review_notes": _notes_for_segment(all_notes, segment_id, idx),
+                    "review_notes": _language_notes_for_segment(
+                        all_notes, segment_id, idx
+                    ),
                     "round": round_no,
                 },
             )
@@ -805,7 +1045,9 @@ def build_graph(
     def qa_node(state: TranslationState) -> dict:
         """逐 segment QA；分数按 token 权重汇总，任一失败则章级 rework。"""
         polished_parts = state.get("polished_segments") or []
-        draft_parts = state.get("draft_segments") or []
+        draft_parts = (
+            state.get("revised_segments") or state.get("draft_segments") or []
+        )
         runtime_notes = list(state.get("runtime_notes") or [])
         merged = list(state.get("review_notes") or [])
         failures = list(state.get("segment_failures") or [])
@@ -905,9 +1147,11 @@ def build_graph(
                         "suggestion": str(suggestion),
                         "segment_id": segment_id,
                         "segment_index": idx,
+                        "source": "qa",
                         "created_round": round_no,
                         "status": "open",
                         "scope": "segment",
+                        "resolution": "pending",
                     }
                 )
             emit_event(
@@ -1066,12 +1310,14 @@ def build_graph(
     graph.add_node("retrieve", _observed_node("retrieve", retrieve_node))
     graph.add_node("translate", _observed_node("translate", translate_node))
     graph.add_node("edit", _observed_node("edit", edit_node))
+    graph.add_node("revise", _observed_node("revise", revise_node))
     graph.add_node("polish", _observed_node("polish", polish_node))
     graph.add_node("qa", _observed_node("qa", qa_node))
     graph.set_entry_point(start_stage)
     graph.add_edge("retrieve", "translate")
     graph.add_edge("translate", "edit")
-    graph.add_edge("edit", "polish")
+    graph.add_edge("edit", "revise")
+    graph.add_edge("revise", "polish")
     graph.add_edge("polish", "qa")
     # TODO: 回退落点扩展点——如实验证明定点修订优于整段重译，改为回退 edit
     graph.add_conditional_edges(

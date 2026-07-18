@@ -37,7 +37,9 @@ class BaseAgent(ABC):
 | `glossary` | `dict[str, str]` 本章术语映射 | 翻译 / 审校 / QA |
 | `tm_matches` | `list[dict]`，`search_tm` 结果序列化 | 翻译 |
 | `story_bible` | `StoryBible` 摘要字典 | 翻译 / 审校 / QA |
-| `review_notes` | `list[str]` 审校+QA 批注 | 翻译（返工轮） |
+| `review_notes` | 带片段、轮次、严重度和 `resolution` 的审校+QA 批注 | 翻译返工 / Translator 定点修订 / 润色 / QA |
+| `mode` | `revision` 时复用 Translator 执行定点事实修订 | 翻译 |
+| `draft` | 当前片初稿或待修订稿 | 审校 / Translator 定点修订 / 润色 |
 | `prev_summary` | 上一章/相邻段摘要（衔接用） | 翻译 |
 | `round` | 当前返工轮次（0 起） | 全部 |
 
@@ -51,6 +53,7 @@ class BaseAgent(ABC):
 | 术语 Agent | `terminologist` | `glossary: dict[str, str]`、`new_terms: list[dict]` | `glossary` | fast |
 | 翻译 Agent | `translator` | `draft: str` | `draft` | strong |
 | 审校 Agent | `editor` | `review_notes: list[dict]` | `review_notes` | strong |
+| 翻译 Agent（revision mode） | `translator` | `draft: str` | `revised` | strong |
 | 润色 Agent | `polisher` | `polished: str` | `polished` | strong |
 | QA 终审 | `qa` | `qa_score: float`、`qa_verdict: str`、`qa_detail: dict` | `qa_score`、`qa_verdict`、建议并入 `review_notes` | strong |
 
@@ -81,7 +84,8 @@ class BaseAgent(ABC):
 
 ### 3.3 翻译 Agent（translator）
 
-- **职责**：产出初译 `draft`；返工轮需携带 `review_notes` 批注做约束重译。
+- **职责**：产出初译 `draft`；返工轮携带未落实的 `review_notes` 约束重译；
+  `mode=revision` 时在 Editor 后只按事实性意见定点修订并产出 `revised`。
 - **输入**：`source_text`（当前待译核心片段），`context.glossary / tm_matches / story_bible / prev_summary / review_notes / round / context_before / context_after`；相邻上下文只供消歧，不得输出。
 - **输出**：`draft`。
 - **Prompt 设计要点**：
@@ -93,18 +97,23 @@ class BaseAgent(ABC):
 
 ### 3.4 审校 Agent（editor）
 
-- **职责**：对照原文逐段审校 `draft`，产出结构化问题清单；只管"对不对"，不直接改稿，修改由后续润色/返工执行。
+- **职责**：对照原文逐段审校 `draft`，产出结构化问题清单；只管“对不对”，
+  不直接改稿，事实性问题由后续 Translator revision mode 执行。
 - **输入**：`source_text` = 原文段，`context` 携带 `draft`（从 state 注入）、`glossary`、`bible`。
 - **输出**：`review_notes`（每条含严重度、类型、位置与修改建议）。
-- **编排**：工作流逐 segment 调用，输出统一补 `segment_id/segment_index` 后归并；
-  JSON/schema 失败记入 `segment_failures`，不得当成“无问题”。
+- **编排**：工作流逐 segment 调用，输出统一补片段、轮次和 `resolution=pending`
+  后归并；正常输出最多 6 条并限制字段长度，截断或 schema 无效时改用最多 3 条的
+  紧凑恢复请求。恢复仍失败才写入 `segment_failures`，不得当成“无问题”。
 - **检查清单（写入 Prompt）**：误译、漏译、增译；术语与 glossary 不一致；专名拼写前后不一；数字、方位、辈分、境界等级错误；事实与 bible 冲突。
-- **Prompt 设计要点**：要求先逐条核对清单再修订；批注用固定格式 `[类型] 位置说明：问题 → 建议`；无问题时返回原稿 + 空 notes；禁止做风格性改写。
+- **Prompt 设计要点**：合并同类/相邻问题，按 high → medium → low 排序；批注使用
+  固定 JSON schema；无问题时返回空 notes；禁止做风格性改写或复述整段文本。
 
 ### 3.5 润色 Agent（polisher）
 
-- **职责**：在审校后的 `draft` 上做目标语润色，产出 `polished`；提升流畅度与文学性，**不得改动事实与术语**。
-- **输入**：`source_text` 可留原文段（供对照），`context` 携带 `draft`、`glossary`、`prev_segments`。
+- **职责**：在 `revised`（无事实性问题时等于 `draft`）上做目标语润色，产出
+  `polished`；提升流畅度与文学性，**不得补译事实或改动术语**。
+- **输入**：`source_text` 可留原文段（供对照），`context` 携带修订稿和仅限
+  非 high `other` 类型的语言层意见。
 - **输出**：`polished`。
 - **编排**：逐 segment 润色并与对应初稿做长度完整性检查；异常片回退初稿，
   不允许一次章级输出覆盖或截断全部译文。
@@ -127,7 +136,9 @@ class BaseAgent(ABC):
   | 术语一致性 | 20 | 与 glossary/story_bible 的一致性 |
   | 风格贴合 | 20 | 文体、语域、网文类型感 |
 
-  当前通过线：`qa_score ≥ 7.0` 且四维均不低于 6.0 → `pass`。
+  当前通过线：`qa_score ≥ 7.0` 且四维均不低于 6.0 是必要条件；模型明确判
+  `rework` 或仍有未进入翻译/定点修订的 high 事实性意见时一律不放行。两项阈值
+  可由 `agents.qa.pass_score_threshold / min_dimension_score` 配置。
 - **Prompt 设计要点**：先按维度打分再给总评；批注格式与审校一致以便翻译节点统一消费；温度取 0 附近保证判决稳定；**防共谋**：QA 不查看其他 Agent 的 notes，独立判决。
 - **分档建议**：strong。QA 是回环的闸门，误判（过松/过严）直接决定质量与成本。
 

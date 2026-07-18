@@ -11,6 +11,7 @@ _DEFAULT_STAGE_WORKERS = {
     "terminology": 2,
     "translate": 4,
     "edit": 4,
+    "revise": 4,
     "polish": 6,
     "qa": 4,
 }
@@ -49,7 +50,7 @@ class ExecutionConfig:
             if int(workers) < 1:
                 raise ValueError(f"阶段 {stage!r} 的并发数必须至少为 1")
         if self.resume_stage and self.resume_stage not in {
-            "translate", "edit", "polish", "qa"
+            "translate", "edit", "revise", "polish", "qa"
         }:
             raise ValueError(f"不支持从阶段 {self.resume_stage!r} 恢复")
 

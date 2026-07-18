@@ -21,7 +21,7 @@ from urllib.parse import unquote, urlparse
 from mant.observability.runtime import new_run_id
 
 
-DASHBOARD_HTML = r"""<!doctype html>
+DASHBOARD_HTML_LEGACY = r"""<!doctype html>
 <html lang="zh-CN">
 <head>
 <meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
@@ -165,6 +165,16 @@ agents.addEventListener('keydown',e=>{if(e.key!=='Enter'&&e.key!==' ')return;con
 const source=new EventSource('/events');source.onopen=()=>{connection.textContent='实时已连接';connection.className='pill live'};source.onerror=()=>{connection.textContent='重连中';connection.className='pill'};source.onmessage=msg=>{try{ingest(JSON.parse(msg.data))}catch(e){console.error(e)}};
 fetch('/api/health').then(r=>r.json()).then(h=>{if(h.active_job_id){selected=h.active_job_id;translateButton.disabled=true;setJobMessage(`检测到运行中的任务 ${h.active_job_id}，正在重新连接……`);pollJob(h.active_job_id)}}).catch(()=>{});updateCount();
 </script></body></html>"""
+
+
+# 页面作为包资源独立维护，服务仍保持零前端构建链；旧内嵌页仅用于源码包缺少
+# 资源文件时的安全回退。
+_DASHBOARD_PATH = Path(__file__).with_name("dashboard.html")
+DASHBOARD_HTML = (
+    _DASHBOARD_PATH.read_text(encoding="utf-8")
+    if _DASHBOARD_PATH.is_file()
+    else DASHBOARD_HTML_LEGACY
+)
 
 
 class TraceBroker:

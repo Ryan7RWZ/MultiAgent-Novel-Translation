@@ -1,0 +1,217 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<meta name="color-scheme" content="light">
+<title>MANT · 翻译制作台</title>
+<style>
+:root{
+  --canvas:#f3f4f1;--paper:#fff;--paper-soft:#f8f9f7;--ink:#17202a;--muted:#667085;
+  --faint:#98a2b3;--line:#e3e7e2;--line-strong:#d5dbd4;--accent:#3157d5;
+  --accent-dark:#2445b5;--accent-soft:#eef2ff;--teal:#087f72;--teal-soft:#e8f7f3;
+  --amber:#b85f19;--amber-soft:#fff4e8;--red:#c53b45;--red-soft:#fff0f1;
+  --shadow:0 1px 2px rgba(20,30,40,.04),0 12px 32px rgba(20,30,40,.035);
+  --radius:18px;--radius-sm:11px;--sans:Inter,"Segoe UI","PingFang SC","Microsoft YaHei",sans-serif;
+  --mono:"SFMono-Regular",Consolas,"Liberation Mono",monospace;
+}
+*{box-sizing:border-box}
+html{scroll-behavior:smooth}
+body{margin:0;background:var(--canvas);color:var(--ink);font:14px/1.6 var(--sans);-webkit-font-smoothing:antialiased}
+button,input,textarea,select{font:inherit}
+button{color:inherit}
+svg{display:block}
+.topbar{position:sticky;top:0;z-index:20;height:68px;display:flex;align-items:center;gap:20px;padding:0 32px;background:rgba(255,255,255,.92);border-bottom:1px solid rgba(213,219,212,.9);backdrop-filter:blur(14px)}
+.brand{display:flex;align-items:center;gap:12px;min-width:230px}
+.brand-mark{width:34px;height:34px;display:grid;place-items:center;border-radius:10px;background:var(--ink);color:#fff;box-shadow:inset 0 0 0 1px rgba(255,255,255,.12)}
+.brand-mark svg{width:19px;height:19px}
+.brand-copy{line-height:1.15}.brand-copy strong{display:block;font-size:14px;letter-spacing:.02em}.brand-copy span{font-size:11px;color:var(--muted)}
+.topbar-center{display:flex;align-items:center;gap:8px;margin-left:auto}
+.status-chip{display:inline-flex;align-items:center;gap:7px;height:30px;padding:0 11px;border:1px solid var(--line);border-radius:999px;background:var(--paper-soft);color:var(--muted);font-size:12px;white-space:nowrap}
+.status-chip::before{content:"";width:7px;height:7px;border-radius:50%;background:var(--faint)}
+.status-chip.live{border-color:#cce8df;background:var(--teal-soft);color:var(--teal)}.status-chip.live::before{background:var(--teal);box-shadow:0 0 0 3px rgba(8,127,114,.12)}
+.status-chip.busy{border-color:#dce3ff;background:var(--accent-soft);color:var(--accent)}.status-chip.busy::before{background:var(--accent);animation:pulse 1.5s ease-out infinite}
+.status-chip.warn{border-color:#f2d8bd;background:var(--amber-soft);color:var(--amber)}.status-chip.warn::before{background:var(--amber)}
+.status-chip.bad{border-color:#f1d1d4;background:var(--red-soft);color:var(--red)}.status-chip.bad::before{background:var(--red)}
+.run-picker{display:flex;align-items:center;gap:8px;margin-left:6px;color:var(--muted);font-size:12px}
+select,input,textarea{border:1px solid var(--line-strong);background:#fff;color:var(--ink);transition:border-color .15s,box-shadow .15s}
+select:focus-visible,input:focus-visible,textarea:focus-visible,button:focus-visible{outline:none;box-shadow:0 0 0 3px rgba(49,87,213,.14);border-color:var(--accent)}
+select{height:34px;max-width:290px;padding:0 34px 0 11px;border-radius:9px}
+.workspace{max-width:1540px;margin:0 auto;padding:28px 32px 52px}
+.intro{display:grid;grid-template-columns:minmax(0,1fr) minmax(380px,.9fr);gap:38px;align-items:end;margin:8px 2px 26px}
+.eyebrow{display:flex;align-items:center;gap:9px;margin-bottom:9px;color:var(--accent);font-size:11px;font-weight:700;letter-spacing:.12em;text-transform:uppercase}
+.eyebrow::before{content:"";width:22px;height:2px;background:currentColor}
+.intro h1{max-width:760px;margin:0;font-size:clamp(27px,3vw,42px);font-weight:650;line-height:1.12;letter-spacing:-.035em}
+.intro h1 em{font-style:normal;color:var(--accent)}
+.intro-copy{margin:12px 0 0;max-width:650px;color:var(--muted);font-size:14px}
+.run-progress{padding:15px 17px;border:1px solid var(--line);border-radius:14px;background:rgba(255,255,255,.64)}
+.progress-head{display:flex;align-items:center;justify-content:space-between;gap:12px;margin-bottom:9px}
+.progress-head strong{font-size:12px}.progress-head span{color:var(--muted);font:11px var(--mono)}
+.progress-track{height:7px;overflow:hidden;border-radius:999px;background:#e5e9e4}.progress-bar{height:100%;width:0;border-radius:inherit;background:linear-gradient(90deg,var(--accent),#6684e7);transition:width .35s ease}
+.progress-caption{display:flex;justify-content:space-between;gap:12px;margin-top:8px;color:var(--faint);font-size:11px}
+.layout{display:grid;grid-template-columns:minmax(380px,.82fr) minmax(600px,1.45fr);gap:18px;align-items:start}
+.right-stack{display:flex;flex-direction:column;gap:18px;min-width:0}
+.panel{min-width:0;overflow:hidden;border:1px solid var(--line);border-radius:var(--radius);background:var(--paper);box-shadow:var(--shadow)}
+.panel-head{min-height:57px;display:flex;align-items:center;justify-content:space-between;gap:14px;padding:0 19px;border-bottom:1px solid var(--line)}
+.panel-title{display:flex;align-items:center;gap:10px;min-width:0}.section-index{color:var(--faint);font:10px var(--mono);letter-spacing:.08em}
+.panel h2{margin:0;font-size:14px;font-weight:650;letter-spacing:-.01em}.panel-hint{color:var(--muted);font-size:11px;text-align:right}
+.composer{padding:18px}
+.fields{display:grid;grid-template-columns:1fr 1fr 100px;gap:10px;margin-bottom:13px}
+.field-label{display:block;color:var(--muted);font-size:11px}.field-label input{height:38px;margin-top:5px;padding:0 10px;border-radius:9px;width:100%}
+.drop-zone{position:relative}.drop-zone::after{content:"拖入 TXT";position:absolute;right:12px;top:11px;padding:2px 7px;border-radius:6px;background:var(--paper-soft);color:var(--faint);font:9px var(--mono);letter-spacing:.08em;pointer-events:none}
+textarea{display:block;width:100%;min-height:330px;padding:16px 15px;resize:vertical;border-radius:12px;line-height:1.8}
+textarea::placeholder,input::placeholder{color:#a7b0bc}.drop-zone.dragging textarea{border-color:var(--accent);background:#fafbff;box-shadow:0 0 0 4px rgba(49,87,213,.12)}
+.actions{display:flex;align-items:center;gap:8px;flex-wrap:wrap;margin-top:12px}
+.btn{height:38px;display:inline-flex;align-items:center;justify-content:center;gap:7px;padding:0 13px;border:1px solid var(--line-strong);border-radius:9px;background:#fff;font-size:12px;font-weight:600;cursor:pointer;transition:transform .12s,background .12s,border-color .12s}
+.btn:hover{background:var(--paper-soft);border-color:#cbd2ca}.btn:active{transform:translateY(1px)}.btn svg{width:15px;height:15px}
+.btn.primary{padding:0 17px;border-color:var(--accent);background:var(--accent);color:#fff}.btn.primary:hover{background:var(--accent-dark);border-color:var(--accent-dark)}
+.btn.ghost{border-color:transparent;background:transparent;color:var(--muted)}.btn:disabled{opacity:.5;cursor:not-allowed;transform:none}.file-button input{display:none}
+.counter{margin-left:auto;color:var(--faint);font:11px var(--mono)}
+.job-message{min-height:41px;display:flex;align-items:flex-start;gap:8px;margin-top:13px;padding:9px 11px;border-radius:9px;background:var(--paper-soft);color:var(--muted);font-size:11px}.job-message::before{content:"i";width:16px;height:16px;display:grid;place-items:center;flex:none;margin-top:1px;border:1px solid var(--line-strong);border-radius:50%;font:10px Georgia,serif}.job-message.error{background:var(--red-soft);color:var(--red)}.job-message.success{background:var(--teal-soft);color:var(--teal)}
+.metrics-grid{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));padding:4px 0}
+.metric{min-width:0;padding:15px 17px;border-right:1px solid var(--line)}.metric:last-child{border-right:0}.metric span{display:block;margin-bottom:3px;color:var(--faint);font-size:10px;letter-spacing:.04em;text-transform:uppercase}.metric strong{display:block;overflow:hidden;color:var(--ink);font-size:19px;font-weight:650;line-height:1.25;text-overflow:ellipsis;white-space:nowrap}.metric small{color:var(--muted);font-size:10px}
+.run-strip{display:grid;grid-template-columns:minmax(0,1.3fr) minmax(190px,.7fr);gap:0;border-top:1px solid var(--line)}
+.run-identity{padding:14px 17px}.run-identity span,.quality-box span{display:block;margin-bottom:3px;color:var(--faint);font-size:10px;text-transform:uppercase}.run-identity strong{display:block;overflow:hidden;font:11px var(--mono);text-overflow:ellipsis;white-space:nowrap}.run-identity small{display:block;margin-top:4px;color:var(--muted)}
+.quality-box{padding:14px 17px;border-left:1px solid var(--line);background:var(--paper-soft)}.quality-box strong{font-size:15px}.quality-box.pass strong{color:var(--teal)}.quality-box.rework strong{color:var(--amber)}.quality-box.fail strong{color:var(--red)}
+.agents{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:10px;padding:14px}
+.agent{position:relative;min-height:112px;padding:13px;border:1px solid var(--line);border-radius:12px;background:var(--paper-soft);cursor:pointer;transition:border-color .15s,background .15s,transform .15s}.agent:hover{transform:translateY(-1px);border-color:#cbd3cc;background:#fff}.agent.viewing{border-color:var(--accent);background:var(--accent-soft);box-shadow:inset 0 0 0 1px var(--accent)}
+.agent-top{display:flex;align-items:center;justify-content:space-between;gap:8px}.agent-number{color:var(--faint);font:10px var(--mono)}.agent-state{width:8px;height:8px;border-radius:50%;background:var(--faint)}
+.agent.running .agent-state{background:var(--accent);animation:pulse 1.5s ease-out infinite}.agent.completed .agent-state{background:var(--teal)}.agent.failed .agent-state{background:var(--red)}
+.agent-name{display:block;margin-top:10px;font-size:13px;font-weight:650}.agent-role{display:block;color:var(--faint);font:9px var(--mono);text-transform:uppercase}.agent-meta{margin-top:8px;color:var(--muted);font-size:10px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+@keyframes pulse{0%{box-shadow:0 0 0 0 rgba(49,87,213,.35)}70%{box-shadow:0 0 0 6px rgba(49,87,213,0)}100%{box-shadow:0 0 0 0 rgba(49,87,213,0)}}
+.monitor-grid{display:grid;grid-template-columns:minmax(0,1.45fr) minmax(330px,.7fr);gap:18px;margin-top:18px}
+.stream-tools,.event-tools{display:flex;align-items:center;gap:7px;min-width:0}.stream-tools select{max-width:330px;height:32px}.agent-tabs{display:flex;gap:5px;padding:11px 16px;border-bottom:1px solid var(--line);overflow-x:auto}.agent-tab,.filter-btn{height:28px;padding:0 10px;border:1px solid transparent;border-radius:7px;background:transparent;color:var(--muted);font-size:10px;cursor:pointer;white-space:nowrap}.agent-tab:hover,.filter-btn:hover{background:var(--paper-soft)}.agent-tab.active,.filter-btn.active{border-color:#d9e1ff;background:var(--accent-soft);color:var(--accent);font-weight:700}
+.stream{height:390px;overflow:auto;padding:17px 19px;background:#1c2430;color:#dfe7ef;white-space:pre-wrap;word-break:break-word;font:12px/1.75 var(--mono);scrollbar-color:#4a5565 transparent}.stream .head{color:#91a9ff;font-weight:700}.stream .placeholder{color:#768294}
+.events{height:429px;overflow:auto}.event{display:grid;grid-template-columns:50px 30px minmax(0,1fr);gap:8px;padding:10px 14px;border-bottom:1px solid #eef0ed}.event:last-child{border-bottom:0}.event:hover{background:var(--paper-soft)}.event-time{color:var(--faint);font:9px var(--mono)}.event-mark{width:8px;height:8px;margin:4px auto 0;border:2px solid #b9c1ba;border-radius:50%;background:#fff}.event-body{min-width:0}.event-body strong{display:block;overflow:hidden;font-size:11px;font-weight:600;text-overflow:ellipsis;white-space:nowrap}.event-body span{display:block;color:var(--muted);font:9px var(--mono);word-break:break-word}.event.done .event-mark{border-color:var(--teal);background:var(--teal)}.event.error .event-mark{border-color:var(--red);background:var(--red)}.event.route .event-mark{border-color:var(--accent)}
+.empty-events{display:grid;place-items:center;height:100%;padding:30px;color:var(--faint);font-size:11px;text-align:center}
+.result-panel{margin-top:18px}.result-actions{display:flex;gap:6px}.result{min-height:210px;max-height:620px;overflow:auto;padding:24px 26px;white-space:pre-wrap;word-break:break-word;font:14px/1.95 Georgia,"Times New Roman","Noto Serif",serif}.result.empty{display:grid;place-items:center;color:var(--faint);font:12px var(--sans);text-align:center}.result-meta{padding:11px 20px;border-top:1px solid var(--line);background:var(--paper-soft);color:var(--muted);font:10px var(--mono);word-break:break-all}
+.footer{display:flex;justify-content:space-between;gap:16px;padding:22px 2px 0;color:var(--faint);font-size:10px}.footer b{color:var(--muted);font-weight:600}
+.sr-only{position:absolute;width:1px;height:1px;padding:0;margin:-1px;overflow:hidden;clip:rect(0,0,0,0);white-space:nowrap;border:0}
+@media(max-width:1120px){.layout{grid-template-columns:1fr}.composer textarea{min-height:250px}.monitor-grid{grid-template-columns:1fr}.events{height:340px}.intro{grid-template-columns:1fr}.run-progress{max-width:none}.panel-hint{display:none}}
+@media(max-width:760px){.topbar{height:auto;min-height:64px;padding:11px 16px;flex-wrap:wrap}.brand{min-width:0}.brand-copy span{display:none}.topbar-center{order:3;width:100%;margin:0;overflow-x:auto}.run-picker{margin-left:auto}.run-picker>span{display:none}.run-picker select{max-width:150px}.workspace{padding:20px 14px 36px}.intro{gap:18px;margin-top:2px}.intro h1{font-size:28px}.layout{display:block}.right-stack{margin-top:14px}.fields{grid-template-columns:1fr 1fr}.fields label:last-child{grid-column:1/-1}.metrics-grid{grid-template-columns:repeat(2,1fr)}.metric:nth-child(2){border-right:0}.metric:nth-child(-n+2){border-bottom:1px solid var(--line)}.run-strip{grid-template-columns:1fr}.quality-box{border-left:0;border-top:1px solid var(--line)}.agents{grid-template-columns:repeat(2,1fr)}.monitor-grid{display:block}.events-panel{margin-top:14px}.stream{height:330px}.result{padding:20px 17px}.footer{flex-direction:column}.counter{width:100%;margin-left:0}}
+@media(prefers-reduced-motion:reduce){*{scroll-behavior:auto!important;animation:none!important;transition:none!important}}
+</style>
+</head>
+<body>
+<header class="topbar">
+  <div class="brand"><span class="brand-mark" aria-hidden="true"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M5 5h8M9 3v2c0 4-2 7-6 9"/><path d="M5 10c2 2 4 3 7 4M14 20l4-11 4 11M15.5 16h5"/></svg></span><div class="brand-copy"><strong>MANT</strong><span>Multi-Agent Novel Translation</span></div></div>
+  <div class="topbar-center"><span id="connection" class="status-chip">正在连接</span><span id="runStatus" class="status-chip">等待任务</span></div>
+  <label class="run-picker"><span>运行记录</span><select id="runSelect" aria-label="选择历史运行"><option value="">自动跟随最新运行</option></select></label>
+</header>
+
+<main class="workspace">
+  <section class="intro">
+    <div><div class="eyebrow">Translation control room</div><h1>让每一段译文，经过<em>完整质量链路</em></h1><p class="intro-copy">提交中文原文，实时观察术语、翻译、审校、润色与终审协作。页面只在本机运行，当前同一时间仅处理一个任务。</p></div>
+    <div class="run-progress"><div class="progress-head"><strong id="progressTitle">等待新任务</strong><span id="progressValue">0%</span></div><div class="progress-track"><div id="progressBar" class="progress-bar"></div></div><div class="progress-caption"><span id="progressStage">尚未进入工作流</span><span id="progressDetail">0 / 0 片段</span></div></div>
+  </section>
+
+  <div class="layout">
+    <section class="panel source-panel">
+      <div class="panel-head"><div class="panel-title"><span class="section-index">01</span><h2>原文与任务</h2></div><span class="panel-hint">支持 UTF-8 TXT</span></div>
+      <div class="composer">
+        <div class="fields"><label class="field-label">作品 ID<input id="workInput" value="demo_work" maxlength="80" autocomplete="off"></label><label class="field-label">章节 ID<input id="chapterInput" placeholder="留空则自动生成" maxlength="80" autocomplete="off"></label><label class="field-label">最大返工<input id="reworkInput" type="number" value="2" min="0" max="10"></label></div>
+        <div id="dropZone" class="drop-zone"><textarea id="sourceText" aria-label="待翻译中文原文" placeholder="粘贴中文小说原文，或将 .txt 文件拖入这里……"></textarea></div>
+        <div class="actions"><label class="btn file-button"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M14 3H6a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V9z"/><path d="M14 3v6h6"/></svg>载入 TXT<input id="fileInput" type="file" accept=".txt,text/plain"></label><button id="translateButton" class="btn primary" type="button"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9"><path d="m5 12 5 5L20 7"/></svg>开始翻译</button><button id="clearButton" class="btn ghost" type="button">清空</button><span id="charCount" class="counter">0 字符</span></div>
+        <div id="jobMessage" class="job-message" role="status" aria-live="polite">填写任务信息后开始翻译，运行状态会在右侧实时更新。</div>
+      </div>
+    </section>
+
+    <div class="right-stack">
+      <section class="panel overview-panel">
+        <div class="panel-head"><div class="panel-title"><span class="section-index">02</span><h2>运行概览</h2></div><span id="overviewHint" class="panel-hint">等待数据</span></div>
+        <div class="metrics-grid"><div class="metric"><span>Segments</span><strong id="metricSegments">—</strong><small>文本片段</small></div><div class="metric"><span>LLM calls</span><strong id="metricCalls">—</strong><small>已完成调用</small></div><div class="metric"><span>Tokens</span><strong id="metricTokens">—</strong><small>输入 + 输出</small></div><div class="metric"><span>Duration</span><strong id="metricDuration">—</strong><small>工作流耗时</small></div></div>
+        <div class="run-strip"><div class="run-identity"><span>Current run</span><strong id="runId">—</strong><small id="work">尚未选择作品与章节</small></div><div id="qualityBox" class="quality-box"><span>Quality verdict</span><strong id="qa">等待终审</strong><small id="rework">返工 0 次</small></div></div>
+      </section>
+
+      <section class="panel agents-panel">
+        <div class="panel-head"><div class="panel-title"><span class="section-index">03</span><h2>协作链路</h2></div><span class="panel-hint">选择角色查看模型输出</span></div>
+        <div id="agents" class="agents"></div>
+      </section>
+    </div>
+  </div>
+
+  <div class="monitor-grid">
+    <section class="panel stream-panel">
+      <div class="panel-head"><div class="panel-title"><span class="section-index">04</span><h2>模型实时输出</h2></div><div class="stream-tools"><label class="sr-only" for="callSelect">当前模型调用</label><select id="callSelect"><option value="">等待模型调用</option></select></div></div>
+      <div id="agentTabs" class="agent-tabs" aria-label="按 Agent 筛选输出"></div>
+      <div id="stream" class="stream" aria-live="polite"><span class="placeholder">模型开始响应后，增量内容会出现在这里。</span></div>
+    </section>
+
+    <aside class="panel events-panel">
+      <div class="panel-head"><div class="panel-title"><span class="section-index">05</span><h2>事件记录</h2></div><div id="eventFilters" class="event-tools"><button class="filter-btn active" data-filter="all" type="button">全部</button><button class="filter-btn" data-filter="error" type="button">异常</button></div></div>
+      <div id="events" class="events"><div class="empty-events">运行事件将在这里按时间倒序显示。<br>高频 token 事件已自动隐藏。</div></div>
+    </aside>
+  </div>
+
+  <section class="panel result-panel">
+    <div class="panel-head"><div class="panel-title"><span class="section-index">06</span><h2>最终译文</h2></div><div class="result-actions"><button id="copyButton" class="btn" type="button" disabled>复制译文</button><button id="downloadButton" class="btn" type="button" disabled>下载 TXT</button></div></div>
+    <div id="resultText" class="result empty">完成全部阶段后，英文译文会在这里呈现。</div><div id="resultMeta" class="result-meta">尚无输出文件</div>
+  </section>
+  <footer class="footer"><span><b>MANT</b> · Local translation workspace</span><span>输入与运行产物保存在本地 data 目录</span></footer>
+</main>
+
+<script>
+const $=id=>document.getElementById(id);
+const ui={connection:$('connection'),runStatus:$('runStatus'),runSelect:$('runSelect'),runId:$('runId'),work:$('work'),qa:$('qa'),rework:$('rework'),qualityBox:$('qualityBox'),agents:$('agents'),agentTabs:$('agentTabs'),callSelect:$('callSelect'),stream:$('stream'),events:$('events'),eventFilters:$('eventFilters'),workInput:$('workInput'),chapterInput:$('chapterInput'),reworkInput:$('reworkInput'),sourceText:$('sourceText'),dropZone:$('dropZone'),fileInput:$('fileInput'),translateButton:$('translateButton'),clearButton:$('clearButton'),charCount:$('charCount'),jobMessage:$('jobMessage'),resultText:$('resultText'),resultMeta:$('resultMeta'),copyButton:$('copyButton'),downloadButton:$('downloadButton'),metricSegments:$('metricSegments'),metricCalls:$('metricCalls'),metricTokens:$('metricTokens'),metricDuration:$('metricDuration'),overviewHint:$('overviewHint'),progressTitle:$('progressTitle'),progressValue:$('progressValue'),progressBar:$('progressBar'),progressStage:$('progressStage'),progressDetail:$('progressDetail')};
+const roles=['orchestrator','terminologist','translator','editor','polisher','qa'];
+const roleName={orchestrator:'任务编排',terminologist:'术语分析',translator:'翻译与返工',editor:'文本审校',polisher:'文学润色',qa:'质量终审'};
+const roleShort={orchestrator:'编排',terminologist:'术语',translator:'翻译',editor:'审校',polisher:'润色',qa:'终审'};
+const statusText={waiting:'等待',running:'运行中',completed:'已完成',failed:'失败'};
+const nodeName={dispatch:'文本分段',retrieve:'术语分析',translate:'初稿翻译',edit:'编辑审校',revise:'修订返工',polish:'文学润色',qa:'质量终审'};
+const nodeOrder=['retrieve','translate','edit','revise','polish','qa'];
+const eventNames={'run.started':'运行开始','run.completed':'运行完成','run.failed':'运行失败','segmentation.completed':'文本分段完成','node.started':'阶段开始','node.completed':'阶段完成','node.failed':'阶段失败','agent.started':'Agent 开始','agent.completed':'Agent 完成','agent.failed':'Agent 失败','llm.started':'模型调用开始','llm.completed':'模型调用完成','llm.failed':'模型调用失败','llm.retry':'模型重试','llm.fallback':'模型降级','workflow.route':'工作流路由','stage.segment_completed':'片段阶段完成','output.integrity_failed':'输出完整性拦截','qa.aggregated':'QA 汇总','task.failed':'并发任务失败','checkpoint.hit':'检查点命中','manifest.saved':'运行清单已保存'};
+const runs=new Map();let selected='',eventFilter='all',renderQueued=false,activeJob='';
+function newState(){return{events:[],agentTasks:{},outputs:{},calls:{},callOrder:[],summary:{status:'waiting'},stageProgress:{},promptTokens:0,completionTokens:0,llmCompleted:0,segments:0,displayAgent:'',displayCall:'',resultText:'',resultMeta:''}}
+function state(id){if(!runs.has(id))runs.set(id,newState());return runs.get(id)}
+function esc(value){return String(value??'').replace(/[&<>"']/g,char=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[char]))}
+function current(){return selected||[...runs.keys()].at(-1)||''}
+function compact(value){const n=Number(value)||0;if(n>=1e6)return`${(n/1e6).toFixed(1)}M`;if(n>=1e3)return`${(n/1e3).toFixed(n>=1e4?0:1)}K`;return String(n)}
+function duration(ms){if(!ms)return'—';const sec=ms/1000;if(sec<60)return`${sec.toFixed(sec<10?1:0)}s`;return`${Math.floor(sec/60)}m ${Math.round(sec%60)}s`}
+function segmentLabel(value){const match=String(value||'').match(/#seg(\d+)$/);return match?`片段 ${Number(match[1])+1}`:(value||'整章')}
+function ensureOption(id){if(!id)return;if(![...ui.runSelect.options].some(option=>option.value===id)){const option=document.createElement('option');option.value=id;option.textContent=id.length>30?`${id.slice(0,27)}…`:id;option.title=id;ui.runSelect.appendChild(option)}if(selected===id)ui.runSelect.value=id}
+function scheduleRender(id=current()){if(renderQueued)return;renderQueued=true;requestAnimationFrame(()=>{renderQueued=false;render(id)})}
+function ingest(event){if(!event?.run_id)return;const s=state(event.run_id);ensureOption(event.run_id);if(event.event_type!=='llm.token'){s.events.push(event);if(s.events.length>700)s.events.shift()}
+  const agent=event.agent||event.node||'workflow',taskKey=`${agent}|${event.segment_id||''}|${event.round??0}`;
+  if(event.event_type==='run.started'){s.summary={...s.summary,status:'running',work:event.work_id,chapter:event.chapter_id,started:event.timestamp};s.startedAt=Date.parse(event.timestamp)}
+  if(event.event_type==='segmentation.completed')s.segments=Number(event.payload.segment_count)||0;
+  if(event.event_type==='node.started')s.activeNode=event.node;
+  if(event.event_type==='stage.segment_completed'){const stage=event.payload.stage||event.node;s.stageProgress[stage]={completed:(s.stageProgress[stage]?.completed||0)+1,total:Number(event.payload.segment_count)||s.segments};s.activeNode=event.node||stage}
+  if(event.event_type==='agent.started')s.agentTasks[taskKey]={role:agent,status:'running',started:event.timestamp,tier:event.tier,segment:event.segment_id,round:event.round};
+  if(event.event_type==='agent.completed'||event.event_type==='agent.failed'){const old=s.agentTasks[taskKey]||{role:agent,segment:event.segment_id,round:event.round,tier:event.tier};s.agentTasks[taskKey]={...old,status:event.event_type==='agent.failed'||event.payload?.ok===false?'failed':'completed',ms:event.metrics?.duration_ms}}
+  const callId=event.payload?.call_id;
+  if(callId&&event.event_type==='llm.started'){if(!s.calls[callId])s.callOrder.push(callId);s.calls[callId]={id:callId,agent,segment:event.segment_id,round:event.round,tier:event.tier,model:event.payload.model,status:'running',started:event.timestamp};s.outputs[callId]='';s.outputAgent=agent;s.outputCall=callId}
+  if(callId&&event.event_type==='llm.token'){if(!s.calls[callId]){s.callOrder.push(callId);s.calls[callId]={id:callId,agent,segment:event.segment_id,round:event.round,tier:event.tier,status:'running'}}s.outputs[callId]=(s.outputs[callId]||'')+(event.payload.delta||'');s.outputAgent=agent;s.outputCall=callId}
+  if(callId&&(event.event_type==='llm.completed'||event.event_type==='llm.failed')){const old=s.calls[callId]||{id:callId,agent,segment:event.segment_id,round:event.round,tier:event.tier};s.calls[callId]={...old,status:event.event_type==='llm.failed'?'failed':'completed',ms:event.metrics?.duration_ms};if(event.event_type==='llm.completed'){s.llmCompleted+=1;s.promptTokens+=Number(event.metrics?.prompt_tokens)||0;s.completionTokens+=Number(event.metrics?.completion_tokens)||0}}
+  if(event.event_type==='qa.aggregated')s.qaAggregate={...event.payload,score:event.metrics?.qa_score};
+  if(event.event_type==='run.completed')s.summary={...s.summary,status:'completed',...event.payload,ms:event.metrics?.duration_ms};
+  if(event.event_type==='run.failed')s.summary={...s.summary,status:'failed',error:event.payload?.error,ms:event.metrics?.duration_ms};
+  if(!selected||selected===event.run_id)scheduleRender(event.run_id)
+}
+function roleStatus(s,role){const tasks=Object.values(s.agentTasks).filter(task=>task.role===role),running=tasks.filter(task=>task.status==='running').length,done=tasks.filter(task=>task.status==='completed').length,failed=tasks.filter(task=>task.status==='failed').length,latest=tasks.at(-1)||{};return{tasks,running,done,failed,latest,status:running?'running':failed?'failed':tasks.length&&done===tasks.length?'completed':'waiting'}}
+function renderAgents(s){const viewing=s?.displayAgent||s?.outputAgent||'';ui.agents.innerHTML=roles.map((role,index)=>{const info=s?roleStatus(s,role):{tasks:[],running:0,done:0,failed:0,latest:{},status:'waiting'};const detail=info.tasks.length?`${info.done}/${info.tasks.length} 完成${info.failed?` · ${info.failed} 异常`:''}`:'等待调度';return`<div class="agent ${info.status}${viewing===role?' viewing':''}" data-role="${role}" role="button" tabindex="0"><div class="agent-top"><span class="agent-number">0${index+1}</span><span class="agent-state" title="${statusText[info.status]}"></span></div><span class="agent-name">${roleName[role]}</span><span class="agent-role">${role}</span><div class="agent-meta">${esc(info.latest.tier||statusText[info.status])} · ${esc(detail)}</div></div>`}).join('');ui.agentTabs.innerHTML=roles.map(role=>`<button type="button" class="agent-tab${viewing===role?' active':''}" data-role="${role}">${roleShort[role]}</button>`).join('')}
+function progressFor(s){if(s.summary.status==='completed')return{value:100,stage:s.summary.qa_verdict==='rework'?'质量检查完成，存在待返工片段':'全部阶段已完成',detail:`${s.segments||s.summary.segments||0} / ${s.segments||s.summary.segments||0} 片段`};if(s.summary.status==='failed')return{value:100,stage:'流程异常终止',detail:s.summary.error||'请查看事件记录'};const node=s.activeNode||'';let index=nodeOrder.indexOf(node);if(index<0)index=0;const stage=s.stageProgress[node]||{};const partial=stage.total?Math.min(1,stage.completed/stage.total):0;return{value:Math.max(2,Math.round((index+partial)/nodeOrder.length*100)),stage:nodeName[node]||'准备工作流',detail:stage.total?`${stage.completed||0} / ${stage.total} 片段`:`${s.segments||0} 个片段`}}
+function render(id){const s=id&&runs.has(id)?runs.get(id):null;renderAgents(s);if(!s)return;const summary=s.summary||{},qaSummary=summary.qa_summary||s.qaAggregate||{},verdict=summary.qa_verdict||s.qaAggregate?.verdict||'',score=summary.qa_score??s.qaAggregate?.score;ui.runId.textContent=id;ui.runId.title=id;ui.work.textContent=`${summary.work||'—'} / ${summary.chapter||'—'}`;ui.metricSegments.textContent=s.segments||summary.segments||'—';ui.metricCalls.textContent=s.llmCompleted||s.callOrder.length||'—';ui.metricTokens.textContent=s.promptTokens+s.completionTokens?compact(s.promptTokens+s.completionTokens):'—';ui.metricDuration.textContent=duration(summary.ms);ui.overviewHint.textContent=summary.execution?`峰值并发 ${summary.execution.peak_in_flight??'—'}`:(statusText[summary.status]||'运行中');
+  const verdictLabel={pass:'通过',rework:'需要返工',failed:'失败'}[verdict]||'等待终审';ui.qa.textContent=score==null?verdictLabel:`${verdictLabel} · ${Number(score).toFixed(2)}`;ui.rework.textContent=`返工 ${summary.rework_count??0} 次${qaSummary.coverage==null?'':` · 覆盖 ${(Number(qaSummary.coverage)*100).toFixed(0)}%`}`;ui.qualityBox.className=`quality-box ${verdict||''}`;
+  const st=summary.status||'running';ui.runStatus.textContent=st==='completed'&&verdict==='rework'?'流程完成 · 待返工':statusText[st]||st;ui.runStatus.className=`status-chip ${st==='failed'?'bad':st==='running'?'busy':st==='completed'&&verdict==='rework'?'warn':st==='completed'?'live':''}`;
+  const progress=progressFor(s);ui.progressTitle.textContent=st==='running'?'翻译链路运行中':st==='completed'?'本次运行已完成':st==='failed'?'本次运行失败':'等待新任务';ui.progressValue.textContent=`${progress.value}%`;ui.progressBar.style.width=`${progress.value}%`;ui.progressStage.textContent=progress.stage;ui.progressDetail.textContent=progress.detail;
+  const viewing=s.displayAgent||s.outputAgent||'',roleCalls=s.callOrder.filter(cid=>!viewing||s.calls[cid]?.agent===viewing),fallback=roleCalls.at(-1)||s.outputCall||'',call=s.displayCall&&roleCalls.includes(s.displayCall)?s.displayCall:fallback;s.displayCall=call;ui.callSelect.innerHTML=roleCalls.length?roleCalls.slice().reverse().map(cid=>{const c=s.calls[cid]||{},label=`${segmentLabel(c.segment)} · R${c.round??0} · ${statusText[c.status]||c.status}`;return`<option value="${esc(cid)}"${cid===call?' selected':''}>${esc(label)}</option>`}).join(''):'<option value="">等待模型调用</option>';ui.callSelect.disabled=!roleCalls.length;const meta=s.calls[call]||{};ui.stream.innerHTML=call?`<span class="head">${esc(roleName[meta.agent]||meta.agent)} / ${esc(segmentLabel(meta.segment))} / ${esc(meta.model||meta.tier||'model')}</span>\n\n${esc(s.outputs[call]||'（等待首个 token…）')}`:'<span class="placeholder">模型开始响应后，增量内容会出现在这里。</span>';ui.stream.scrollTop=ui.stream.scrollHeight;renderEvents(s);
+  if(s.resultText){ui.resultText.textContent=s.resultText;ui.resultText.classList.remove('empty');ui.resultMeta.textContent=s.resultMeta||'译文已生成';ui.copyButton.disabled=false;ui.downloadButton.disabled=false}else if(selected===id){ui.resultText.textContent=st==='running'?'翻译进行中，最终文本将在质量链路完成后显示。':'完成全部阶段后，英文译文会在这里呈现。';ui.resultText.classList.add('empty')}
+}
+function renderEvents(s){let list=s.events;if(eventFilter==='error')list=list.filter(event=>/failed|retry|fallback|integrity|exhausted|opened/.test(event.event_type));list=list.slice(-120).reverse();if(!list.length){ui.events.innerHTML='<div class="empty-events">当前筛选条件下没有事件。</div>';return}ui.events.innerHTML=list.map(event=>{const type=event.event_type||'',cls=/failed|integrity|exhausted|opened/.test(type)?'error':/completed|saved|hit|aggregated/.test(type)?'done':/route/.test(type)?'route':'',time=(event.timestamp||'').slice(11,19),who=event.agent||event.node||'workflow';let detail=eventNames[type]||type;if(type==='workflow.route')detail+=` → ${event.payload?.route||''}`;if(type==='stage.segment_completed')detail+=` · ${event.payload?.stage||''} ${Number(event.payload?.segment_index??0)+1}/${event.payload?.segment_count||'?'}`;if(type==='output.integrity_failed')detail+=` · 片段 ${Number(event.payload?.segment_index??0)+1} · 完整度 ${Math.round(Number(event.payload?.ratio||0)*100)}%`;return`<div class="event ${cls}"><span class="event-time">${esc(time)}</span><span class="event-mark"></span><div class="event-body"><strong>${esc(detail)}</strong><span>${esc(who)}${event.segment_id?` · ${esc(segmentLabel(event.segment_id))}`:''}</span></div></div>`}).join('')}
+function showAgent(role){const id=current();if(!id)return;const s=state(id);s.displayAgent=role;const calls=s.callOrder.filter(cid=>s.calls[cid]?.agent===role);s.displayCall=calls.at(-1)||'';render(id)}
+function setJobMessage(text,kind=''){ui.jobMessage.textContent=text;ui.jobMessage.className=`job-message ${kind}`}
+function setBusy(busy){ui.translateButton.disabled=busy;ui.clearButton.disabled=busy;ui.fileInput.disabled=busy}
+function updateCount(){ui.charCount.textContent=`${ui.sourceText.value.length.toLocaleString('zh-CN')} 字符`}
+async function loadFile(file){if(!file)return;if(!file.name.toLowerCase().endsWith('.txt')){setJobMessage('请选择扩展名为 .txt 的 UTF-8 文本文件。','error');return}try{ui.sourceText.value=await file.text();if(!ui.chapterInput.value)ui.chapterInput.value=file.name.replace(/\.txt$/i,'');updateCount();setJobMessage(`已载入 ${file.name}，共 ${ui.sourceText.value.length.toLocaleString('zh-CN')} 字符。`,'success')}catch(error){setJobMessage(`读取文件失败：${error.message}`,'error')}}
+async function pollJob(id){if(activeJob===id&&state(id).polling)return;activeJob=id;state(id).polling=true;while(true){await new Promise(resolve=>setTimeout(resolve,1000));try{const response=await fetch(`/api/jobs/${encodeURIComponent(id)}`,{cache:'no-store'}),job=await response.json();if(!response.ok)throw new Error(job.error||'任务查询失败');if(job.status==='completed'){const s=state(id),meta=job.metadata||{},coverage=meta.qa_summary?.coverage;s.resultText=job.result_text||'（译文为空）';s.resultMeta=`输出：${job.output_path} · QA=${meta.qa_verdict??'—'} · score=${meta.qa_score??'—'}${coverage==null?'':` · 覆盖 ${(Number(coverage)*100).toFixed(1)}%`}`;setJobMessage('翻译完成，可以复制或下载最终译文。','success');setBusy(false);s.polling=false;render(id);return}if(job.status==='failed'){setJobMessage(`翻译失败：${job.error||'未知错误'}`,'error');setBusy(false);state(id).polling=false;return}setJobMessage(`任务 ${id} 正在运行，请保持页面打开……`)}catch(error){setJobMessage(`任务状态查询失败，稍后自动重试：${error.message}`,'error')}}}
+async function startTranslation(){const text=ui.sourceText.value;if(!text.trim()){setJobMessage('请粘贴原文或拖入一个非空 TXT 文件。','error');ui.sourceText.focus();return}setBusy(true);ui.resultText.textContent='正在建立翻译任务……';ui.resultText.classList.add('empty');ui.resultMeta.textContent='等待输出';setJobMessage('正在提交任务……');try{const response=await fetch('/api/translate',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({text,work_id:ui.workInput.value,chapter_id:ui.chapterInput.value,max_rework:Number(ui.reworkInput.value)})}),job=await response.json();if(!response.ok)throw new Error(job.error||'提交失败');selected=job.run_id;state(job.run_id).summary={status:'running',work:job.work_id,chapter:job.chapter_id};ensureOption(job.run_id);ui.runSelect.value=job.run_id;setJobMessage(`任务 ${job.job_id} 已提交，正在启动 Agent……`,'success');render(job.run_id);pollJob(job.job_id)}catch(error){setJobMessage(`提交失败：${error.message}`,'error');setBusy(false)}}
+function copyResult(){const text=state(current()).resultText;if(!text)return;navigator.clipboard.writeText(text).then(()=>setJobMessage('译文已复制到剪贴板。','success')).catch(()=>setJobMessage('无法访问剪贴板，请手动选择译文复制。','error'))}
+function downloadResult(){const s=state(current());if(!s.resultText)return;const blob=new Blob([s.resultText],{type:'text/plain;charset=utf-8'}),link=document.createElement('a');link.href=URL.createObjectURL(blob);link.download=`${s.summary.chapter||'mant-translation'}.txt`;link.click();setTimeout(()=>URL.revokeObjectURL(link.href),1000)}
+ui.sourceText.addEventListener('input',updateCount);ui.fileInput.addEventListener('change',()=>loadFile(ui.fileInput.files[0]));ui.clearButton.addEventListener('click',()=>{ui.sourceText.value='';ui.fileInput.value='';ui.resultText.textContent='完成全部阶段后，英文译文会在这里呈现。';ui.resultText.classList.add('empty');ui.resultMeta.textContent='尚无输出文件';ui.copyButton.disabled=true;ui.downloadButton.disabled=true;updateCount();ui.sourceText.focus()});ui.translateButton.addEventListener('click',startTranslation);ui.copyButton.addEventListener('click',copyResult);ui.downloadButton.addEventListener('click',downloadResult);
+['dragenter','dragover'].forEach(name=>ui.dropZone.addEventListener(name,event=>{event.preventDefault();ui.dropZone.classList.add('dragging')}));['dragleave','drop'].forEach(name=>ui.dropZone.addEventListener(name,event=>{event.preventDefault();ui.dropZone.classList.remove('dragging')}));ui.dropZone.addEventListener('drop',event=>loadFile(event.dataTransfer.files[0]));
+ui.runSelect.addEventListener('change',()=>{selected=ui.runSelect.value;render(current())});ui.callSelect.addEventListener('change',()=>{const id=current();if(!id)return;state(id).displayCall=ui.callSelect.value;render(id)});[ui.agents,ui.agentTabs].forEach(container=>container.addEventListener('click',event=>{const target=event.target.closest('[data-role]');if(target)showAgent(target.dataset.role)}));ui.agents.addEventListener('keydown',event=>{if(!['Enter',' '].includes(event.key))return;const card=event.target.closest('.agent');if(card){event.preventDefault();showAgent(card.dataset.role)}});ui.eventFilters.addEventListener('click',event=>{const button=event.target.closest('[data-filter]');if(!button)return;eventFilter=button.dataset.filter;[...ui.eventFilters.children].forEach(child=>child.classList.toggle('active',child===button));const id=current();if(id)renderEvents(state(id))});
+const source=new EventSource('/events');source.onopen=()=>{ui.connection.textContent='实时连接';ui.connection.className='status-chip live'};source.onerror=()=>{ui.connection.textContent='正在重连';ui.connection.className='status-chip'};source.onmessage=message=>{try{ingest(JSON.parse(message.data))}catch(error){console.error(error)}};
+fetch('/api/health').then(response=>response.json()).then(health=>{if(health.active_job_id){selected=health.active_job_id;state(selected).summary.status='running';ensureOption(selected);setBusy(true);setJobMessage(`检测到运行中的任务 ${selected}，正在恢复进度……`);render(selected);pollJob(selected)}}).catch(()=>{});renderAgents(null);updateCount();
+</script>
+</body>
+</html>

@@ -31,6 +31,8 @@ class TranslationState(TypedDict):
         draft_segments / draft: 分片初稿和它的确定性章级拼接结果。
         review_notes: 审校 / QA 批注列表；QA 判返工时追加结构化批注，
             作为回退到 translate 节点的返工输入。
+        revised_segments / revised: Editor 之后由 Translator 定点修订模式产出的
+            分片事实修订稿；没有事实性意见的片段直接沿用初稿。
         polished_segments / polished: 分片润色稿和确定性章级拼接结果。
         segment_failures: 各阶段按 segment 记录的失败/完整性告警；存在任一
             条目时章级 QA 不得放行。
@@ -59,6 +61,8 @@ class TranslationState(TypedDict):
     draft_segments: list[str]
     draft: str
     review_notes: list
+    revised_segments: list[str]
+    revised: str
     polished_segments: list[str]
     polished: str
     segment_failures: list[dict[str, Any]]
@@ -103,6 +107,8 @@ def init_state(
         draft_segments=[],
         draft="",
         review_notes=[],
+        revised_segments=[],
+        revised="",
         polished_segments=[],
         polished="",
         segment_failures=[],

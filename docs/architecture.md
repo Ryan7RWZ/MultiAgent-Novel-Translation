@@ -90,9 +90,10 @@ flowchart TB
 | `segmentation_stats` | `dict` | 入口 | 预算、边界分布、硬切数和回拼校验统计 |
 | `glossary` | `dict` | 术语 Agent | 本章命中的术语映射 `{源术语: 译名}` |
 | `draft_segments` / `draft` | `list[str]` / `str` | 翻译 | 分片初稿与确定性章级拼接结果 |
-| `review_notes` | `list` | 审校 / QA | 带 `segment_id` 的批注列表；QA 判 rework 时作为定点返工输入 |
+| `review_notes` | `list` | 审校 / QA | 带片段、轮次和落实状态的批注；QA 判 rework 时作为定点返工输入 |
+| `revised_segments` / `revised` | `list[str]` / `str` | Translator revision mode | 按事实性审校意见定点修订后的分片稿；无此类意见时沿用初稿 |
 | `polished_segments` / `polished` | `list[str]` / `str` | 润色 | 分片润色稿与确定性章级拼接结果 |
-| `segment_failures` | `list[dict]` | 翻译 / 审校 / 润色 / QA | 分片失败与完整性告警；非空时章级 QA 不得放行 |
+| `segment_failures` | `list[dict]` | 翻译 / 审校 / 修订 / 润色 / QA | 分片失败与完整性告警；非空时章级 QA 不得放行 |
 | `segment_qa` | `list[dict]` | QA | 每片 QA 得分、裁决和明细 |
 | `rework_segment_indices` | `list[int]` | QA | 下一轮需要定点重跑的片段序号 |
 | `execution_stats` | `dict` | 执行层 | 派发、失败、拒绝、并发峰值和 checkpoint 统计 |
@@ -128,7 +129,7 @@ sequenceDiagram
     loop 最多 max_rework+1 轮
         S->>M: search_tm / get_story_bible（注入上下文）
         S->>S: 各阶段内按 segment 有界并发
-        S->>S: translate → edit → polish → QA
+        S->>S: translate → edit → revise（按需）→ polish → QA
         S->>S: 每阶段按 segment_index 确定性归并
         S->>S: 按 token 权重归并 QA；任一分片失败则 rework
         alt qa_verdict == pass
@@ -145,11 +146,14 @@ sequenceDiagram
 ### 3.3 回环设计要点
 
 - **批注驱动返工**：QA 判 rework 时必须给出结构化批注（错误位置、类型、修改建议），追加到 `review_notes`；翻译节点在下一轮把批注作为硬约束注入 Prompt，而不是盲目重译。
-- **分片完整性**：`draft_segments` 与 `polished_segments` 必须和原文片段等长；
-  润色稿字符比例越界时只回退对应初稿。流中断或输出上限产生的残稿不得进入状态。
+- **职责闭环**：Editor 的漏译、误译、专名及 high 意见由 Translator revision mode
+  定点落实并标记 `resolution`；Polisher 只接收非 high 的语言类意见。
+- **分片完整性**：`draft_segments`、`revised_segments` 与 `polished_segments` 必须和
+  原文片段等长；润色稿字符比例越界时只回退对应修订稿。流中断或输出上限产生的
+  残稿不得进入状态。
 - **确定性归并**：Editor 批注按 `segment_id` 合并；QA 章级分数按源片估算 token
   加权，只有所有片均 pass 且 `segment_failures` 为空时才允许章级 pass。
-- **定点返工**：QA 和完整性失败写入 `rework_segment_indices`；下一轮四个正文
+- **定点返工**：QA 和完整性失败写入 `rework_segment_indices`；下一轮五个正文
   阶段只创建这些片段的任务，未失败片段沿用上一轮完整产物。
 - **上限兜底**：`rework_count >= max_rework` 时强制放行并打 `needs_human_review` 标记，避免 LLM 间互相不认可导致的死循环与费用失控。上限默认值取配置 `workflow.max_rework`。
 - **回退落点**：当前设计回退到"翻译"节点（携带审校与 QA 的全部批注重译）；如实验表明重译不如定点修订，可在 M4 联调期改为回退到"审校"节点，状态机条件边留有此扩展点。
