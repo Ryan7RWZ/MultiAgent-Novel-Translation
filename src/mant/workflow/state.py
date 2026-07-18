@@ -20,13 +20,20 @@ class TranslationState(TypedDict):
     字段:
         work_id: 作品 ID（贯穿记忆层：术语库 / TM / 小说圣经的命名空间）。
         chapter_id: 章节 ID（一般为文件名或章节号）。
+        source_text: 安全规范化后的完整原文。所有章级 Agent 使用该字段，避免
+            重新拼接片段时增删空白。
         segments: 调度 Agent 切分后的原文片段列表，按序翻译；入口写入后不变。
+        segment_meta: 与 ``segments`` 等长的定位/边界/邻接上下文元数据。
+        segmentation_stats: 切片预算、边界和可逆性统计，供观测与导出。
         glossary: 本章生效的术语映射 ``{源术语: 规范译名}``（retrieve 节点
             经术语 Agent 注入）。
-        draft: 当前译稿（translate 产出初稿，edit 节点原地修订）。
+        draft_segments / draft: 分片初稿和它的确定性章级拼接结果。
         review_notes: 审校 / QA 批注列表；QA 判返工时追加结构化批注，
             作为回退到 translate 节点的返工输入。
-        polished: 润色后的译稿（QA 终审对象）。
+        polished_segments / polished: 分片润色稿和确定性章级拼接结果。
+        segment_failures: 各阶段按 segment 记录的失败/完整性告警；存在任一
+            条目时章级 QA 不得放行。
+        segment_qa: 每个 segment 的 QA 分数、裁决与明细，章级结果由代码归并。
         qa_score: QA 终审质量分（由 QAAgent 按维度权重确定性计算）。
         qa_verdict: QA 终审结论：``"pass"`` 放行 / ``"rework"`` 返工
             （状态机兼容 docs 旧称 ``"fail"``）。
@@ -39,11 +46,18 @@ class TranslationState(TypedDict):
 
     work_id: str
     chapter_id: str
+    source_text: str
     segments: list[str]
+    segment_meta: list[dict]
+    segmentation_stats: dict[str, Any]
     glossary: dict
+    draft_segments: list[str]
     draft: str
     review_notes: list
+    polished_segments: list[str]
     polished: str
+    segment_failures: list[dict[str, Any]]
+    segment_qa: list[dict[str, Any]]
     qa_score: float
     qa_verdict: str
     rework_count: int
@@ -59,6 +73,9 @@ def init_state(
     segments: list[str],
     *,
     max_rework: int = DEFAULT_MAX_REWORK,
+    source_text: str | None = None,
+    segment_meta: list[dict] | None = None,
+    segmentation_stats: dict[str, Any] | None = None,
 ) -> TranslationState:
     """构造初始状态的便捷工厂（骨架）。
 
@@ -68,11 +85,18 @@ def init_state(
     return TranslationState(
         work_id=work_id,
         chapter_id=chapter_id,
+        source_text="".join(segments) if source_text is None else str(source_text),
         segments=list(segments),
+        segment_meta=list(segment_meta or []),
+        segmentation_stats=dict(segmentation_stats or {}),
         glossary={},
+        draft_segments=[],
         draft="",
         review_notes=[],
+        polished_segments=[],
         polished="",
+        segment_failures=[],
+        segment_qa=[],
         qa_score=0.0,
         qa_verdict="",
         rework_count=0,

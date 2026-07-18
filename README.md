@@ -127,6 +127,13 @@ set OPENAI_API_KEY=sk-你的key
 
 - `settings.yaml` 已加入 .gitignore；**API key 只走环境变量**（由 `api_key_env` 指定变量名）；
 - 未配置 API key 时 `LLMClient` 返回 `[DRAFT]` 前缀的占位响应，流程仍可跑通。
+- `segmentation.*` 控制无 LLM 的机械初始切片：默认正文目标/上限为
+  900/1200 估算 token，并为每片注入受限的相邻上下文。算法、不变量与元数据
+  见 [确定性初始切片设计](docs/segmentation.md)。
+- Editor、Polisher、QA 与 Translator 复用同一组 segment；润色稿长度异常会
+  回退对应初稿，QA 按片评分后加权归并。`workflow.min_polished_segment_ratio`
+  / `max_polished_segment_ratio` 可调整完整性阈值，provider 的
+  `partial_retries` 控制残稿完整重试。
 
 ### 4.3 四个子命令
 

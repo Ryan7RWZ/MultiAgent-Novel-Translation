@@ -107,6 +107,8 @@ class LLMClient:
         self._prompt_tokens = 0
         self._completion_tokens = 0
         self._last_notes: list[str] = []
+        self._last_call_incomplete = False
+        self._last_call_id = ""
 
     # ------------------------------------------------------------------
     # 构造
@@ -198,6 +200,11 @@ class LLMClient:
         """最近一次 ``complete`` 调用的说明（降级原因 / 重试记录等）。"""
         return list(self._last_notes)
 
+    @property
+    def last_call_incomplete(self) -> bool:
+        """最近一次调用是否因流中断或输出上限只得到不完整文本。"""
+        return self._last_call_incomplete
+
     # ------------------------------------------------------------------
     # 核心调用
     # ------------------------------------------------------------------
@@ -215,6 +222,8 @@ class LLMClient:
             - 未安装 ``openai`` SDK → 返回 ``[DRAFT]`` 占位响应并记录 notes；
             - 未配置 API key → 同上；
             - 请求重试耗尽 → 同上。
+            - 已产生文本后中断或被长度上限截断 → 丢弃残稿并完整重试；
+              完整重试耗尽时返回空字符串，交由片段级工作流处理。
 
         参数:
             system: 系统提示词（各 Agent 的 ``SYSTEM_PROMPT``）。
@@ -225,14 +234,45 @@ class LLMClient:
         返回:
             模型输出文本；降级时为 ``[DRAFT]`` 前缀的占位文本。
         """
-        return "".join(
-            self.stream_complete(
-                system,
-                user,
-                temperature=temperature,
-                max_tokens=max_tokens,
-            )
+        # ``stream_complete`` 已把增量发往观测层，但 complete() 尚未把它交给
+        # 业务 Agent，因此可以安全丢弃半截结果并从头重试，避免残稿进入 state。
+        partial_retries = max(
+            0, int(self.provider.extra.get("partial_retries", 1) or 0)
         )
+        accumulated_notes: list[str] = []
+        for retry_index in range(partial_retries + 1):
+            text = "".join(
+                self.stream_complete(
+                    system,
+                    user,
+                    temperature=temperature,
+                    max_tokens=max_tokens,
+                )
+            )
+            accumulated_notes.extend(self._last_notes)
+            if not self._last_call_incomplete:
+                self._last_notes = accumulated_notes
+                return text
+            if retry_index < partial_retries:
+                note = (
+                    f"检测到不完整输出，已丢弃 {len(text)} 字符并进行第 "
+                    f"{retry_index + 1} 次完整重试。"
+                )
+                accumulated_notes.append(note)
+                emit_event(
+                    "llm.retry",
+                    tier=self.tier,
+                    payload={
+                        "call_id": self._last_call_id,
+                        "attempt": retry_index + 1,
+                        "error": "IncompleteOutput",
+                        "discarded_chars": len(text),
+                        "wait_seconds": 0,
+                    },
+                )
+        accumulated_notes.append("不完整输出重试耗尽，已丢弃残稿并返回空结果。")
+        self._last_notes = accumulated_notes
+        return ""
 
     def stream_complete(
         self,
@@ -244,13 +284,16 @@ class LLMClient:
     ) -> Iterator[str]:
         """执行真正的流式 chat completion，逐段产出模型文本。
 
-        ``complete`` 只是本方法的收集器，因此所有现有 Agent 无需改接口即可
-        获得底层流式传输。流式请求一旦已经产出文本就不再自动重试，避免把
-        失败尝试的半截文本与重试结果拼在一起；首 token 前失败仍按配置退避重试。
+        ``complete`` 是本方法的收集器，因此所有现有 Agent 无需改接口即可
+        获得底层流式传输。本方法不会在已经产出文本后原地重试；收集器可丢弃
+        该次全部残稿后发起新的完整调用，绝不拼接两次输出。首 token 前失败仍
+        按配置退避重试。
         """
         self._last_notes = []
+        self._last_call_incomplete = False
         cfg = self.provider
         call_id = uuid.uuid4().hex[:12]
+        self._last_call_id = call_id
         started = time.perf_counter()
         start_prompt_tokens = self._prompt_tokens
         start_completion_tokens = self._completion_tokens
@@ -296,6 +339,7 @@ class LLMClient:
         output_chars = 0
         for attempt in range(attempts):
             emitted_this_attempt = False
+            finish_reason: str | None = None
             stream = None
             try:
                 request: dict[str, Any] = {
@@ -322,7 +366,11 @@ class LLMClient:
                     choices = getattr(chunk, "choices", None) or []
                     if not choices:
                         continue
-                    delta = getattr(getattr(choices[0], "delta", None), "content", None)
+                    choice = choices[0]
+                    chunk_finish_reason = getattr(choice, "finish_reason", None)
+                    if chunk_finish_reason:
+                        finish_reason = str(chunk_finish_reason)
+                    delta = getattr(getattr(choice, "delta", None), "content", None)
                     if not delta:
                         continue
                     if not isinstance(delta, str):
@@ -335,6 +383,33 @@ class LLMClient:
                         payload={"call_id": call_id, "delta": delta},
                     )
                     yield delta
+                if finish_reason == "length":
+                    self._last_call_incomplete = True
+                    self._last_notes.append(
+                        f"模型输出达到 max_tokens={max_tokens} 上限，结果不完整。"
+                    )
+                    emit_event(
+                        "llm.failed",
+                        tier=self.tier,
+                        payload={
+                            "call_id": call_id,
+                            "error": "OutputTruncated",
+                            "partial": bool(output_chars),
+                        },
+                        metrics={
+                            "duration_ms": round(
+                                (time.perf_counter() - started) * 1000, 2
+                            ),
+                            "output_chars": output_chars,
+                            "prompt_tokens": (
+                                self._prompt_tokens - start_prompt_tokens
+                            ),
+                            "completion_tokens": (
+                                self._completion_tokens - start_completion_tokens
+                            ),
+                        },
+                    )
+                    return
                 emit_event(
                     "llm.completed",
                     tier=self.tier,
@@ -358,9 +433,10 @@ class LLMClient:
                 return
             except Exception as exc:  # noqa: BLE001 - 统一降级，不向上抛
                 if emitted_this_attempt:
+                    self._last_call_incomplete = True
                     note = (
                         f"流式输出已开始后调用中断（{type(exc).__name__}），"
-                        "为避免重复文本不再自动重试。"
+                        "本次残稿已标记为不完整，等待收集器决定完整重试。"
                     )
                     self._last_notes.append(note)
                     emit_event(

@@ -148,7 +148,8 @@ class TranslatorAgent(BaseAgent):
     - 模型档位：``strong``（初译质量优先，降低后续审校与返工负担）。
     - 输入：``task.source_text`` 待译原文；记忆注入材料从 ``task.context``
       读取，键为 ``glossary`` / ``story_bible`` / ``tm_matches`` /
-      ``prev_summary`` / ``review_notes`` / ``round``（与工作流上下文对齐）。
+      ``prev_summary`` / ``review_notes`` / ``round`` / ``context_before`` /
+      ``context_after``（与工作流上下文对齐）。
     - 输出：``AgentResult.output = {"draft": str}`` —— 译文初稿。
     """
 
@@ -171,6 +172,7 @@ class TranslatorAgent(BaseAgent):
 1. 忠实原文：剧情、人物、设定、对白含义不得遗漏或篡改，禁止自行增删情节。
 2. 网文文风：节奏明快、对白生动、画面感强，保留爽点与悬念感；避免逐字硬译与翻译腔。
 3. 术语一致：下列术语表中的约定译法必须严格遵循，不得另造译名。
+4. 切片边界：只翻译“待译核心原文”；相邻上文和下文仅用于消歧，禁止把它们翻译、复述或输出。
 
 【返工轮次】
 第 {round} 轮。若下方存在返工批注，必须逐条修复；返工批注的优先级高于
@@ -193,9 +195,15 @@ class TranslatorAgent(BaseAgent):
 
 只输出译文正文，不要输出任何解释、注释、标签或前后缀。"""
 
-    #: 用户提示词模板：{source_text} 为待译原文
-    USER_PROMPT_TEMPLATE: str = """【待译原文】
+    #: 用户提示词模板：相邻上下文只帮助消歧，只有 source_text 可以进入译文。
+    USER_PROMPT_TEMPLATE: str = """【相邻上文（仅供理解，禁止翻译或输出）】
+{context_before}
+
+【待译核心原文（只翻译此区域）】
 {source_text}
+
+【相邻下文（仅供理解，禁止翻译或输出）】
+{context_after}
 
 【译文】"""
 
@@ -218,6 +226,8 @@ class TranslatorAgent(BaseAgent):
         prev_summary = str(task.context.get("prev_summary") or "（无前情提要）")
         review_notes_text = _render_review_notes(task.context.get("review_notes"))
         round_no = max(0, int(task.context.get("round", 0) or 0))
+        context_before = str(task.context.get("context_before") or "（无）")
+        context_after = str(task.context.get("context_after") or "（无）")
 
         # 2) 渲染 Prompt（系统提示词含记忆注入槽位，用户提示词承载原文）
         system = self.build_user_prompt(
@@ -230,10 +240,11 @@ class TranslatorAgent(BaseAgent):
             round=round_no,
         )
         user = self.build_user_prompt(
-            self.USER_PROMPT_TEMPLATE, source_text=task.source_text
+            self.USER_PROMPT_TEMPLATE,
+            source_text=task.source_text,
+            context_before=context_before,
+            context_after=context_after,
         )
-
-        # TODO: 长 segment 的超限检测与分片翻译策略（按段落切分、逐段衔接）
 
         # 3) 调用 LLM；未配置 API key 时 LLMClient 返回 [DRAFT] 占位响应，照常透传
         try:

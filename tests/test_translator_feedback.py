@@ -47,6 +47,8 @@ class TestTranslatorFeedback(unittest.TestCase):
                 source_text="他拔出了剑。",
                 context={
                     "round": 1,
+                    "context_before": "上文只用于消歧。",
+                    "context_after": "下文只用于消歧。",
                     "review_notes": [
                         {
                             "severity": "major",
@@ -59,10 +61,14 @@ class TestTranslatorFeedback(unittest.TestCase):
             )
         )
         self.assertTrue(result.ok)
-        system, _ = llm.calls[0]
+        system, user = llm.calls[0]
         self.assertIn("第 1 轮", system)
         self.assertIn("补回拔剑动作", system)
         self.assertIn("最高优先级", system)
+        self.assertIn("上文只用于消歧。", user)
+        self.assertIn("他拔出了剑。", user)
+        self.assertIn("下文只用于消歧。", user)
+        self.assertIn("禁止翻译或输出", user)
         self.assertEqual(TranslatorAgent.tier, "strong")
 
     def test_existing_glossary_matches_without_llm_candidates(self) -> None:

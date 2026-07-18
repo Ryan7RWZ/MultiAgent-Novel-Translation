@@ -1,7 +1,7 @@
-"""调度 Agent（OrchestratorAgent）：章节切分、执行计划与任务分派。
+"""调度 Agent（OrchestratorAgent）：机械章节切分、执行计划与任务分派。
 
 职责定位（docs/agent-design.md §3.1）：
-- 把"一部作品的一章"原文按场景/字数切分为 segment 序列（``split_chapter``）；
+- 把"一部作品的一章"原文按结构/token 预算机械切分为 segment 序列；
 - 产出执行计划 ``plan`` 与分派指令 ``dispatch``（规则优先；仅在需要开放式
   计划/排序判断时才调用 fast 档模型，见 ``SYSTEM_PROMPT``，骨架期不触发）；
 - 状态转移本身由 ``mant.workflow.graph`` 的 LangGraph 状态机表达，本 Agent
@@ -33,10 +33,14 @@
 
 from __future__ import annotations
 
-import re
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any, Mapping
 
 from mant.agents.base import AgentResult, AgentTask, BaseAgent
+from mant.segmentation import (
+    DeterministicSegmenter,
+    SegmentationConfig,
+    SegmentationResult,
+)
 
 if TYPE_CHECKING:  # 仅类型标注，避免运行时循环依赖
     from mant.llm.client import LLMClient
@@ -50,22 +54,14 @@ DEFAULT_MAX_SEGMENT_CHARS = 1200
 #: 过短的尾部 segment 并入前一段的阈值（避免碎片化翻译）
 DEFAULT_MIN_SEGMENT_CHARS = 200
 
-#: 场景分隔线：单独成行、仅由分隔符号组成（网文常见场景切换标记）。
-#: TODO: 单独成行的 "……" 也可能是对白省略号，存在误切风险，后续复核。
-_SCENE_BREAK_RE = re.compile(
-    r"^\s*(?:\*{3,}|-{3,}|_{3,}|={3,}|…+|※+|◇+|◆+|○+|●+|·{3,})\s*$"
-)
-
-#: 句末标点（超长段落做句子级二次切分）
-_SENTENCE_END_RE = re.compile(r"(?<=[。！？!?；;…])")
-
-
 class OrchestratorAgent(BaseAgent):
     """调度 Agent：章节切分 + 静态计划/分派（策略说明见模块 docstring）。
 
     output 约定（``AgentResult.output``）：
-    - ``segments``: ``list[str]``，按场景/字数切分后的原文片段（核心产物，
-      供 ``mant.workflow.graph.run_chapter`` 写入 ``TranslationState.segments``）；
+    - ``segments``: ``list[str]``，按结构/token 预算切分后的原文片段；
+    - ``segment_meta``: ``list[dict]``，片段定位、上下文、边界和哈希；
+    - ``normalized_text`` / ``segmentation_stats``: 可逆原文与切片统计，
+      供 ``mant.workflow.graph.run_chapter`` 写入 ``TranslationState``；
     - ``plan``: ``list[dict]``，流水线步骤清单与依赖（骨架：静态四步计划）；
     - ``dispatch``: ``dict``，分派指令（下一节点、segment 数、携带的 context 键）。
     """
@@ -87,106 +83,58 @@ class OrchestratorAgent(BaseAgent):
         llm: "LLMClient",
         memory: "MemoryHub | None" = None,
         *,
-        max_segment_chars: int = DEFAULT_MAX_SEGMENT_CHARS,
-        min_segment_chars: int = DEFAULT_MIN_SEGMENT_CHARS,
+        segmentation_config: SegmentationConfig | Mapping[str, Any] | None = None,
+        max_segment_chars: int | None = None,
+        min_segment_chars: int | None = None,
     ) -> None:
         super().__init__(llm, memory)
-        self.max_segment_chars = max(100, int(max_segment_chars))
-        self.min_segment_chars = max(
-            0, min(int(min_segment_chars), self.max_segment_chars // 2)
-        )
+        # 旧的字符预算参数保留为兼容入口；新调用应使用 token 预算配置。
+        if segmentation_config is not None and (
+            max_segment_chars is not None or min_segment_chars is not None
+        ):
+            raise ValueError("不能同时设置 segmentation_config 与旧字符预算参数")
+        if max_segment_chars is not None or min_segment_chars is not None:
+            legacy_max = max(
+                100,
+                int(
+                    max_segment_chars
+                    if max_segment_chars is not None
+                    else DEFAULT_MAX_SEGMENT_CHARS
+                ),
+            )
+            legacy_min = max(
+                0,
+                min(
+                    int(
+                        min_segment_chars
+                        if min_segment_chars is not None
+                        else DEFAULT_MIN_SEGMENT_CHARS
+                    ),
+                    legacy_max // 2,
+                ),
+            )
+            segmentation_config = {
+                "target_core_tokens": max(1, int(legacy_max * 0.75)),
+                "max_core_tokens": legacy_max,
+                "min_core_tokens": legacy_min,
+            }
+        self.segmenter = DeterministicSegmenter(segmentation_config)
+        # 为只读旧属性的外部代码保留可解释值；切片实际以 token 为单位。
+        self.max_segment_chars = self.segmenter.config.max_core_tokens
+        self.min_segment_chars = self.segmenter.config.min_core_tokens
 
     # ------------------------------------------------------------------
-    # 核心：章节切分启发式
+    # 核心：确定性章节切分
     # ------------------------------------------------------------------
+    def segment_chapter(
+        self, text: str, *, chapter_id: str = "chapter"
+    ) -> SegmentationResult:
+        """返回完整机械切片结果；该路径不调用 LLM，也不访问记忆层。"""
+        return self.segmenter.segment(text, chapter_id=chapter_id)
+
     def split_chapter(self, text: str) -> list[str]:
-        """把整章原文切分为 segment 列表（启发式实现）。
-
-        规则（按优先级）：
-        1. 统一换行符后按空行划分段落；
-        2. 命中场景分隔线（如 ``***``、``……`` 单独成行）→ 强制硬切分，
-           分隔线本身丢弃（TODO: 可配置为保留为独立 segment 以维持版式对应）；
-        3. 按 ``max_segment_chars`` 字符预算顺序合并段落，超出预算另起 segment；
-        4. 单段超过预算 → 按句末标点做句子级二次切分，单句仍超长则硬截断；
-        5. 末段过短（< ``min_segment_chars``）时并入前一段，避免碎片化。
-
-        TODO:
-        - 引入 LLM/分类模型识别场景边界（视角切换、对话密度、时间跳跃）；
-        - 依据 fast/strong 档模型上下文窗口动态调整 ``max_segment_chars``；
-        - 保留原文缩进/换行结构，便于译文排版还原；
-        - 段间重叠上下文（overlap）缓解切分处的指代断裂。
-        """
-        normalized = text.replace("\r\n", "\n").replace("\r", "\n").strip()
-        if not normalized:
-            return []
-
-        segments: list[str] = []
-        current: list[str] = []
-        current_len = 0
-        para_lines: list[str] = []
-
-        def _flush_segment() -> None:
-            nonlocal current, current_len
-            if current:
-                segments.append("\n\n".join(current))
-                current = []
-                current_len = 0
-
-        def _flush_paragraph() -> None:
-            """把段落缓冲按字符预算并入当前 segment（必要时先另起一段）。"""
-            nonlocal current_len
-            if not para_lines:
-                return
-            para = "\n".join(para_lines).strip()
-            para_lines.clear()
-            if not para:
-                return
-            for piece in self._split_long_paragraph(para):
-                extra = len(piece) + (2 if current else 0)  # 2 = "\n\n" 连接符
-                if current and current_len + extra > self.max_segment_chars:
-                    _flush_segment()
-                    extra = len(piece)
-                current.append(piece)
-                current_len += extra
-
-        for line in normalized.split("\n"):
-            stripped = line.strip()
-            if not stripped:  # 空行：段落边界
-                _flush_paragraph()
-                continue
-            if _SCENE_BREAK_RE.match(stripped):  # 场景分隔线：硬切分并丢弃
-                _flush_paragraph()
-                _flush_segment()
-                continue
-            para_lines.append(stripped)
-        _flush_paragraph()
-        _flush_segment()
-
-        # 规则 5：过短尾段并入前一段
-        if len(segments) > 1 and len(segments[-1]) < self.min_segment_chars:
-            segments[-2] = segments[-2] + "\n\n" + segments[-1]
-            segments.pop()
-        return segments
-
-    def _split_long_paragraph(self, para: str) -> list[str]:
-        """超长段落 → 按句末标点聚合为不超长度的句子块；单句仍超长则硬截断。"""
-        if len(para) <= self.max_segment_chars:
-            return [para]
-        chunks: list[str] = []
-        buf = ""
-        for sentence in _SENTENCE_END_RE.split(para):
-            if not sentence:
-                continue
-            if buf and len(buf) + len(sentence) > self.max_segment_chars:
-                chunks.append(buf)
-                buf = ""
-            buf += sentence
-            while len(buf) > self.max_segment_chars:  # 单句超长：硬截断
-                chunks.append(buf[: self.max_segment_chars])
-                buf = buf[self.max_segment_chars :]
-        if buf:
-            chunks.append(buf)
-        return chunks
+        """兼容旧接口，仅返回片段正文；完整元数据请用 ``segment_chapter``。"""
+        return self.segment_chapter(text).texts
 
     # ------------------------------------------------------------------
     # BaseAgent 接口
@@ -200,15 +148,26 @@ class OrchestratorAgent(BaseAgent):
           （使用 ``SYSTEM_PROMPT``，只输出 JSON 计划）；
         - 结合小说圣经识别 POV 切换以优化切分点。
         """
-        segments = self.split_chapter(task.source_text)
+        result = self.segment_chapter(task.source_text, chapter_id=task.chapter_id)
+        segments = result.texts
+        stats = result.statistics.to_dict()
         notes = [
             f"章节切分完成：{len(task.source_text)} 字 → {len(segments)} 个 segment"
-            f"（max_segment_chars={self.max_segment_chars}）"
+            f"（max_core_tokens={self.segmenter.config.max_core_tokens}）"
         ]
         if not segments:
             notes.append("原文为空或仅剩空白字符，无 segment 产出。")
             return self._result(
-                ok=False, output={"segments": [], "plan": [], "dispatch": {}}, notes=notes
+                ok=False,
+                output={
+                    "segments": [],
+                    "segment_meta": [],
+                    "normalized_text": result.normalized_text,
+                    "segmentation_stats": stats,
+                    "plan": [],
+                    "dispatch": {},
+                },
+                notes=notes,
             )
 
         # 骨架期静态计划：主链路四步（状态机与条件边见 mant.workflow.graph）
@@ -232,6 +191,13 @@ class OrchestratorAgent(BaseAgent):
         }
         return self._result(
             ok=True,
-            output={"segments": segments, "plan": plan, "dispatch": dispatch},
+            output={
+                "segments": segments,
+                "segment_meta": result.metadata,
+                "normalized_text": result.normalized_text,
+                "segmentation_stats": stats,
+                "plan": plan,
+                "dispatch": dispatch,
+            },
             notes=notes,
         )

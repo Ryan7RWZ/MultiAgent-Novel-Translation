@@ -13,28 +13,43 @@ from mant.workflow.state import init_state
 
 
 class ScriptedLLM:
-    def __init__(self, *, always_rework: bool = False) -> None:
+    def __init__(
+        self, *, always_rework: bool = False, first_rework: bool = True
+    ) -> None:
         self.last_notes: list[str] = []
         self.qa_calls = 0
         self.translator_systems: list[str] = []
         self.always_rework = always_rework
+        self.first_rework = first_rework
+        self.role_calls = {
+            "terminologist": 0,
+            "translator": 0,
+            "editor": 0,
+            "polisher": 0,
+            "qa": 0,
+        }
 
     def with_tier(self, _: str) -> "ScriptedLLM":
         return self
 
     def complete(self, system: str, user: str, **_: object) -> str:
         if "术语抽取专家" in system:
+            self.role_calls["terminologist"] += 1
             return "[]"
         if "资深网络小说译者" in system:
+            self.role_calls["translator"] += 1
             self.translator_systems.append(system)
             return f"Draft {len(self.translator_systems)}"
         if "翻译审校编辑" in system:
+            self.role_calls["editor"] += 1
             return "[]"
         if "英文网络小说润色师" in system:
+            self.role_calls["polisher"] += 1
             return "Polished draft"
         if "翻译质量终审专家" in system:
+            self.role_calls["qa"] += 1
             self.qa_calls += 1
-            if self.always_rework or self.qa_calls == 1:
+            if self.always_rework or (self.first_rework and self.qa_calls == 1):
                 return json.dumps(
                     {
                         "accuracy": 5,
@@ -60,6 +75,59 @@ class ScriptedLLM:
 
 
 class TestWorkflow(unittest.TestCase):
+    def test_editor_polisher_and_qa_process_every_segment(self) -> None:
+        llm = ScriptedLLM(first_rework=False)
+        app = build_graph(llm, None, max_rework=0)  # type: ignore[arg-type]
+        final = app.invoke(
+            init_state(
+                "demo",
+                "multi",
+                ["第一段。", "第二段。"],
+                max_rework=0,
+                segment_meta=[
+                    {"segment_id": "multi#seg0000", "estimated_tokens": 5},
+                    {"segment_id": "multi#seg0001", "estimated_tokens": 5},
+                ],
+            )
+        )
+
+        self.assertEqual(llm.role_calls["translator"], 2)
+        self.assertEqual(llm.role_calls["editor"], 2)
+        self.assertEqual(llm.role_calls["polisher"], 2)
+        self.assertEqual(llm.role_calls["qa"], 2)
+        self.assertEqual(len(final["draft_segments"]), 2)
+        self.assertEqual(len(final["polished_segments"]), 2)
+        self.assertEqual(len(final["segment_qa"]), 2)
+        self.assertEqual(final["qa_score"], 8.0)
+        self.assertEqual(final["qa_verdict"], "pass")
+        self.assertEqual(final["segment_failures"], [])
+        self.assertEqual(final["polished"], "Polished draft\n\nPolished draft")
+
+    def test_short_polisher_output_falls_back_and_forces_rework(self) -> None:
+        class ShortPolishLLM(ScriptedLLM):
+            def complete(self, system: str, user: str, **kwargs: object) -> str:
+                if "资深网络小说译者" in system:
+                    self.role_calls["translator"] += 1
+                    self.translator_systems.append(system)
+                    return "A complete translated paragraph. " * 20
+                if "英文网络小说润色师" in system:
+                    self.role_calls["polisher"] += 1
+                    return "Too short."
+                return super().complete(system, user, **kwargs)
+
+        llm = ShortPolishLLM(first_rework=False)
+        app = build_graph(llm, None, max_rework=0)  # type: ignore[arg-type]
+        final = app.invoke(init_state("demo", "ratio", ["原文。"], max_rework=0))
+
+        self.assertEqual(final["polished"], final["draft"])
+        self.assertEqual(final["qa_verdict"], "rework")
+        self.assertTrue(
+            any(item.get("stage") == "polish" for item in final["segment_failures"])
+        )
+        self.assertTrue(
+            any("needs_human_review" in str(note) for note in final["review_notes"])
+        )
+
     def test_qa_feedback_drives_one_rework_then_passes(self) -> None:
         llm = ScriptedLLM()
         app = build_graph(llm, None, max_rework=2)  # type: ignore[arg-type]
