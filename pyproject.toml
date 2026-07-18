@@ -34,3 +34,6 @@ mant = "mant.cli:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]
+
+[tool.setuptools.package-data]
+"mant.observability" = ["dashboard.html"]

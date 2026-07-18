@@ -481,8 +481,14 @@ class TestObservability(unittest.TestCase):
         self.assertIn('id="sourceText"', DASHBOARD_HTML)
         self.assertIn('id="fileInput"', DASHBOARD_HTML)
         self.assertIn('id="callSelect"', DASHBOARD_HTML)
+        self.assertIn('id="progressBar"', DASHBOARD_HTML)
+        self.assertIn('id="eventFilters"', DASHBOARD_HTML)
+        self.assertIn('id="copyButton"', DASHBOARD_HTML)
+        self.assertIn('id="downloadButton"', DASHBOARD_HTML)
         self.assertIn("agentTasks", DASHBOARD_HTML)
         self.assertIn("callOrder", DASHBOARD_HTML)
+        self.assertIn("requestAnimationFrame", DASHBOARD_HTML)
+        self.assertIn("event.event_type!=='llm.token'", DASHBOARD_HTML)
         self.assertIn("/api/translate", DASHBOARD_HTML)
 
     def test_closing_dashboard_terminates_active_translation(self) -> None:

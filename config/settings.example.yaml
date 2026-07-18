@@ -42,6 +42,12 @@ agents:
   editor:
     temperature: 0.0
     max_tokens: 1536
+    max_review_notes: 6                # 合并同类问题并按 high 优先，防止逐段穷举撑爆输出
+    max_span_chars: 80
+    max_suggestion_chars: 160
+    compact_recovery_attempts: 1       # 截断/schema 失败后用更小契约恢复，不原样重试
+    compact_recovery_max_tokens: 768
+    compact_recovery_max_notes: 3
     structured_json: true
     thinking: disabled
   polisher:
@@ -52,6 +58,8 @@ agents:
     structured_json: true              # 向兼容端点请求 JSON object 模式
     repair_attempts: 1                 # schema 无效时最多做一次短 JSON 修复
     repair_max_tokens: 384
+    pass_score_threshold: 7.0          # 阈值是必要条件；模型明确 rework 时仍不放行
+    min_dimension_score: 6.0
     thinking: disabled
 
 # 在线翻译的初始切片完全由机械规则完成，不调用 LLM。
@@ -72,6 +80,7 @@ concurrency:
     terminology: 2
     translate: 4
     edit: 4
+    revise: 4                          # 仅有事实性审校意见的片段会产生调用
     polish: 6
     qa: 4
   budget:
@@ -80,6 +89,7 @@ concurrency:
     max_failures_per_stage:            # 独立熔断，避免上游失败挤占 QA 额度
       translate: 8
       edit: 8
+      revise: 8
       polish: 8
       qa: 20
   checkpoint:

@@ -208,6 +208,78 @@ class TranslatorAgent(BaseAgent):
 
 【译文】"""
 
+    REVISION_SYSTEM_PROMPT: str = """你是一名资深网络小说译者，当前只负责定点修订译文。
+
+【职责边界】
+1. 逐条落实审校意见中的漏译、误译和专名错误；不得遗漏任何 high 问题。
+2. 对照原文保留现有译文中已经正确的全部事实、段落顺序和专名，不得删减或重复。
+3. 只修正审校指出的事实性问题和为保证语法所必需的局部表达；文学润色由下游负责。
+4. 相邻上下文仅用于消歧，禁止把它们翻译、复述或输出。
+
+【必须落实的审校意见】
+{review_notes}
+
+【术语表】
+{glossary}
+
+只输出修订后的完整译文正文，不要解释、标签、批注、代码块或前后缀。"""
+
+    REVISION_USER_PROMPT_TEMPLATE: str = """【相邻上文（仅供理解，禁止输出）】
+{context_before}
+
+【原文】
+{source_text}
+
+【当前译文】
+{draft}
+
+【相邻下文（仅供理解，禁止输出）】
+{context_after}
+
+【修订后的完整译文】"""
+
+    def _run_revision(self, task: AgentTask) -> AgentResult:
+        """按审校意见定点修订，输出仍沿用 ``{"draft": str}`` 契约。"""
+        notes: list[str] = []
+        draft = str(task.context.get("draft") or "").strip()
+        if not draft:
+            notes.append("task.context 缺少 draft（待修订译文），定点修订跳过")
+            return self._result(ok=False, output={"draft": ""}, notes=notes)
+
+        review_notes = task.context.get("review_notes") or []
+        if not review_notes:
+            notes.append("没有待处理的审校意见，沿用当前译文")
+            return self._result(ok=True, output={"draft": draft}, notes=notes)
+
+        system = self.build_user_prompt(
+            self.REVISION_SYSTEM_PROMPT,
+            review_notes=_render_review_notes(review_notes),
+            glossary=_render_glossary(task.context.get("glossary")),
+        )
+        user = self.build_user_prompt(
+            self.REVISION_USER_PROMPT_TEMPLATE,
+            source_text=task.source_text,
+            draft=draft,
+            context_before=str(task.context.get("context_before") or "（无）"),
+            context_after=str(task.context.get("context_after") or "（无）"),
+        )
+        try:
+            revised = self.llm.complete(
+                system,
+                user,
+                temperature=min(self.temperature, 0.2),
+                max_tokens=self.max_tokens,
+                thinking=self.thinking,
+            )
+        except Exception as exc:  # noqa: BLE001 —— Agent 结果契约承接失败
+            notes.append(f"LLM 调用失败：{exc!r}")
+            return self._result(ok=False, output={"draft": ""}, notes=notes)
+        notes.extend(getattr(self.llm, "last_notes", []))
+        if not revised.strip():
+            notes.append("LLM 返回空修订稿，拒绝覆盖当前译文")
+            return self._result(ok=False, output={"draft": ""}, notes=notes)
+        return self._result(ok=True, output={"draft": revised}, notes=notes)
+
     def run(self, task: AgentTask) -> AgentResult:
         """执行初译：读取记忆注入材料 → 渲染 Prompt → 调用 LLM → 返回初稿。
 
@@ -215,6 +287,9 @@ class TranslatorAgent(BaseAgent):
             - 不抛出未捕获异常；失败时 ``ok=False`` 并在 ``notes`` 说明原因；
             - 未配置真实模型时透传 ``[DRAFT]`` 占位响应，保证离线联调可跑通。
         """
+        if str(task.context.get("mode") or "").strip().lower() == "revision":
+            return self._run_revision(task)
+
         notes: list[str] = []
 
         # 1) 从 task.context 读取记忆注入材料（由调度层 / MemoryHub 提前注入）

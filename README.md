@@ -136,15 +136,18 @@ set DEEPSEEK_API_KEY=你的key
 - `segmentation.*` 控制无 LLM 的机械初始切片：默认正文目标/上限为
   900/1200 估算 token，并为每片注入受限的相邻上下文。算法、不变量与元数据
   见 [确定性初始切片设计](docs/segmentation.md)。
-- Terminologist、Editor、Polisher、QA 与 Translator 复用同一组 segment；术语候选
-  先逐片抽取再确定性归并，润色稿长度异常会
-  回退对应初稿，QA 按片评分后加权归并。`workflow.min_polished_segment_ratio`
+- Terminologist、Translator、Editor、Translator 定点修订、Polisher、QA 复用同一组
+  segment；术语候选先逐片抽取再确定性归并。Editor 的事实性意见先由 Translator
+  revision mode 定点修订，Polisher 只处理语言层问题；润色稿长度异常会回退对应
+  修订稿，QA 按片评分后加权归并。`workflow.min_polished_segment_ratio`
   / `max_polished_segment_ratio` 可调整完整性阈值，provider 的
   `partial_retries` 控制残稿完整重试。
-- `agents.*` 控制角色级生成参数；当前 Editor 使用 1536-token JSON object，QA
-  使用 768-token 紧凑 JSON 和一次短修复；本地 DeepSeek 配置对五个业务角色显式
-  关闭思考模式，避免翻译/结构化输出消耗长推理。这些参数都会进入 checkpoint 语义指纹。
-- `concurrency.*` 控制五个片段阶段的有界并发、阶段独立失败预算、SQLite
+- `agents.*` 控制角色级生成参数；当前 Editor 使用有数量/字段长度上限的
+  1536-token JSON object，并在截断或 schema 无效时改用一次 768-token 紧凑恢复；
+  QA 使用 768-token 紧凑 JSON 和一次短修复，阈值可配置且不会覆盖模型明确的
+  `rework`。本地 DeepSeek 配置对五个业务角色显式关闭思考模式。这些参数都会进入
+  checkpoint 语义指纹。
+- `concurrency.*` 控制六个片段阶段的有界并发、阶段独立失败预算、SQLite
   checkpoint。并发任务可以乱序完成，但结果始终按片段序号归并；QA 返工只重跑
   失败片段。配置与恢复方法见 [长文本并发执行设计](docs/concurrency.md)。
 
@@ -172,10 +175,11 @@ mant monitor
 Windows 可以直接双击仓库根目录的 `start_mant.bat`，它会启动浏览器翻译
 工作台。打开后可以直接粘贴原文，或把 UTF-8 `.txt` 文件拖进页面，填写作品/
 章节 ID 后点击“开始翻译”；Agent 状态、LLM 增量和最终译文都在同一页展示。
-界面为浅色简约风格（浅灰白背景 + 纯白面板 + 蓝色强调）：顶部是白色 sticky
-状态栏，宽屏下左主列依次是输入区、运行概览、六张 Agent 状态卡（状态点徽章）、
-LLM 流式输出与最终译文，右侧为事件时间线；并发调用可按片段和轮次切换，token
-不会在不同片段间串接；窄屏自动折叠为单栏。界面细节与
+界面采用浅色编辑制作台布局：顶部集中显示实时连接、运行状态与历史运行，首屏
+左侧提交原文，右侧同时展示阶段进度、片段/调用/Token/耗时指标和六个 Agent 的
+状态。下方可以按 Agent、片段和轮次查看隔离的 LLM 增量，并通过降噪事件流定位
+工作流路由或完整性异常；最终译文支持复制和下载。高频 token 使用动画帧合并
+渲染且不进入事件列表，长文本并发运行时不会淹没页面；窄屏自动折叠为单栏。界面细节与
 人工验收清单见 [docs/ui-acceptance.md](docs/ui-acceptance.md)。
 
 仍支持把章节文件拖到批处理文件上，或显式传参后直接翻译：

@@ -99,6 +99,37 @@ def _render_review_notes(review_notes: Any) -> str:
     return "\n".join(lines)
 
 
+_HIGH_RISK_ISSUE_TYPES = {
+    "omission",
+    "mistranslation",
+    "proper_noun",
+    "accuracy",
+    "terminology",
+    "qa",
+}
+_RESOLVED_NOTE_STATES = {"translation_applied", "revision_applied", "resolved"}
+
+
+def _unresolved_high_risk_notes(review_notes: Any) -> list[dict[str, Any]]:
+    """找出未进入翻译/定点修订的 high 事实性意见。"""
+    if not isinstance(review_notes, list):
+        return []
+    unresolved: list[dict[str, Any]] = []
+    for note in review_notes:
+        if not isinstance(note, dict):
+            continue
+        severity = str(note.get("severity") or "").strip().lower()
+        issue_type = str(note.get("issue_type") or "").strip().lower()
+        resolution = str(note.get("resolution") or "pending").strip().lower()
+        if (
+            severity == "high"
+            and issue_type in _HIGH_RISK_ISSUE_TYPES
+            and resolution not in _RESOLVED_NOTE_STATES
+        ):
+            unresolved.append(note)
+    return unresolved
+
+
 # ----------------------------------------------------------------------
 # QA 终审 Agent
 # ----------------------------------------------------------------------
@@ -111,8 +142,8 @@ class QAAgent(BaseAgent):
       ``review_notes`` 可选。
     - 输出：``AgentResult.output = {"qa_score": float, "qa_verdict": str,
       "qa_detail": dict}``；``qa_detail`` 含四维得分、verdict、suggestions。
-    - 裁决确定性：``qa_score`` 由代码按权重计算；``qa_verdict`` 经阈值
-      校验，模型自报 verdict 仅作参考（不一致时记入 notes）。
+    - 裁决确定性：``qa_score`` 由代码按权重计算；阈值为放行必要条件，模型
+      明确 ``rework`` 或未落实 high 事实性意见时不得被代码覆盖为 pass。
     """
 
     name: str = "qa"
@@ -137,9 +168,11 @@ class QAAgent(BaseAgent):
         "style": 0.2,
     }
     #: 放行阈值：加权总分 >= PASS_SCORE_THRESHOLD 且各维度 >= MIN_DIMENSION_SCORE
-    # TODO: 阈值改由配置注入（如 workflow.qa_pass_threshold），便于实验调参
     PASS_SCORE_THRESHOLD: float = 7.0
     MIN_DIMENSION_SCORE: float = 6.0
+    #: 实例级阈值可由 agents.qa 配置注入；保留上方常量兼容外部引用。
+    pass_score_threshold: float = PASS_SCORE_THRESHOLD
+    min_dimension_score: float = MIN_DIMENSION_SCORE
 
     # 系统提示词：定义终审角色、评分维度、裁决规则与 JSON 输出 schema。
     # 不含槽位（直接作为 system 传入），因此可以安全包含 JSON 花括号示例。
@@ -154,7 +187,7 @@ class QAAgent(BaseAgent):
 【裁决规则】
 - verdict 只能是 "pass" 或 "rework"。
 - 总分 = accuracy×0.4 + fluency×0.2 + terminology×0.2 + style×0.2；
-  总分 >= 7.0 且四个维度均 >= 6.0 方可判 "pass"，否则判 "rework"。
+  总分与各维度必须达到本次运行给出的阈值方可判 "pass"，否则判 "rework"。
 - 判 "rework" 时必须给出具体、可执行的返工建议（指出问题位置与修改方向）。
 
 【输出要求】
@@ -212,7 +245,13 @@ suggestions 最多 3 条，每条不超过 120 个汉字。格式如下：
         glossary_text = _render_glossary(task.context.get("glossary"))
         review_notes_text = _render_review_notes(task.context.get("review_notes")) or "（无）"
 
-        # 2) 渲染用户提示词（SYSTEM_PROMPT 无槽位，直接作为系统提示词）
+        # 2) 渲染 Prompt；实际阈值显式写入系统提示，避免配置与模型规则漂移。
+        system = (
+            self.SYSTEM_PROMPT
+            + "\n\n【本次放行阈值】总分 >= "
+            + f"{self.pass_score_threshold:g}，且四个维度均 >= "
+            + f"{self.min_dimension_score:g}。阈值只是必要条件；发现严重遗漏时仍须判 rework。"
+        )
         user = self.build_user_prompt(
             self.USER_PROMPT_TEMPLATE,
             source_text=task.source_text,
@@ -224,7 +263,7 @@ suggestions 最多 3 条，每条不超过 120 个汉字。格式如下：
         # 3) 调用 LLM
         try:
             raw = self.llm.complete(
-                self.SYSTEM_PROMPT,
+                system,
                 user,
                 temperature=self.temperature,
                 max_tokens=self.max_tokens,
@@ -296,18 +335,31 @@ suggestions 最多 3 条，每条不超过 120 个汉字。格式如下：
             2,
         )
 
-        # 6) 阈值校验裁决；模型自报 verdict 仅作参考
+        # 6) 保守放行：阈值只是必要条件。模型明确判 rework，或仍有未进入
+        #    修订流程的 high 事实性意见时，代码不得把它覆盖为 pass。
+        llm_verdict = detail.get("verdict", "")
+        unresolved = _unresolved_high_risk_notes(
+            task.context.get("review_notes") or []
+        )
+        threshold_pass = (
+            qa_score >= self.pass_score_threshold
+            and min(detail[dim] for dim in self.DIMENSION_WEIGHTS)
+            >= self.min_dimension_score
+        )
         verdict = (
             "pass"
-            if qa_score >= self.PASS_SCORE_THRESHOLD
-            and min(detail[dim] for dim in self.DIMENSION_WEIGHTS)
-            >= self.MIN_DIMENSION_SCORE
+            if threshold_pass and llm_verdict != "rework" and not unresolved
             else "rework"
         )
-        llm_verdict = detail.get("verdict", "")
         if llm_verdict and llm_verdict != verdict:
             notes.append(
-                f"模型 verdict={llm_verdict!r} 与阈值裁决 {verdict!r} 不一致，采用阈值裁决"
+                f"模型 verdict={llm_verdict!r} 与保守裁决 {verdict!r} 不一致，"
+                "采用保守裁决"
+            )
+        if unresolved:
+            notes.append(f"仍有 {len(unresolved)} 条 high 事实性意见未进入修订，禁止放行")
+            detail.setdefault("suggestions", []).insert(
+                0, "存在尚未落实的高严重度漏译/误译/专名问题，请先完成定点修订。"
             )
         detail["verdict"] = verdict
         if verdict == "rework" and not detail.get("suggestions"):
