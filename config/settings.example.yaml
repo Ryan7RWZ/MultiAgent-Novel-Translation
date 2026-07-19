@@ -5,6 +5,11 @@
 # ============================================================================
 
 llm:
+  # 真正发往供应商的请求在 fast/strong 与所有并发 worker 间共享同一硬预算。
+  # max_reserved_tokens 使用 prompt UTF-8 字节上界 + max_tokens，故意保守；0 表示不限。
+  budget:
+    max_requests: 0
+    max_reserved_tokens: 0
   # LLMClient 分 fast / strong 两档：高频轻量调用走 fast，质量敏感调用走 strong。
   providers:
     fast:
@@ -37,8 +42,14 @@ workflow:
 agents:
   terminologist:
     thinking: disabled                  # DeepSeek 结构化抽取不需要思考模式
+    max_tokens: 1536                    # 有界术语 JSON；真实 40 片测试中 1024 会截断
+    max_terms: 24                       # 仅保留跨章节高价值专名，代码再次稳定裁剪
   translator:
     thinking: disabled                  # 翻译正文不输出/计费长推理
+    revision_max_operations: 8          # 返工仅引用程序生成 unit ID，不由模型猜 anchor
+    revision_max_tokens: 1536           # 补丁 JSON 不使用正文级输出预算
+    revision_repair_attempts: 1         # 坏 JSON/陈旧 ID 仅允许一次带具体错误的纠正
+    revision_repair_max_tokens: 1024
   editor:
     temperature: 0.0
     max_tokens: 1536
@@ -74,15 +85,15 @@ segmentation:
 
 # 切片间有界并发。正式启用前先用小文本验证供应商限流与费用预算。
 concurrency:
-  enabled: false                       # 默认保持串行；验证后再开启
-  global_max_in_flight: 4              # 全局最大在途片段任务
+  enabled: false                       # 默认不产生并发调用；本机容量验收后显式开启
+  global_max_in_flight: 20             # 开启后单阶段最多 20 个在途片段任务
   stages:
-    terminology: 2
-    translate: 4
-    edit: 4
-    revise: 4                          # 仅有事实性审校意见的片段会产生调用
-    polish: 6
-    qa: 4
+    terminology: 20
+    translate: 20
+    edit: 20
+    revise: 20                         # 仅有事实性审校意见的片段会产生调用
+    polish: 20
+    qa: 20
   budget:
     max_segment_calls: 0               # 0 表示不限；生产环境应设硬上限
     max_failures: 0                    # 全局上限；0 表示不限

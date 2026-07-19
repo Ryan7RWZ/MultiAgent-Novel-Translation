@@ -13,7 +13,7 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
 
-from mant.llm.client import LLMClient
+from mant.llm.client import LLMBudgetExceeded, LLMClient
 from mant.observability import RunObserver, run_context
 from mant.observability.events import RunEvent
 from mant.observability.dashboard import DASHBOARD_HTML, TranslationJobManager, _safe_id
@@ -236,6 +236,56 @@ class TestObservability(unittest.TestCase):
         self.assertEqual(event_types.count("llm.token"), 2)
         self.assertEqual(event_types[-1], "llm.completed")
         self.assertEqual([event.sequence for event in sink.events], list(range(1, 5)))
+
+    def test_llm_request_budget_is_shared_across_tiers(self) -> None:
+        root = LLMClient.from_config(
+            {
+                "llm": {
+                    "budget": {"max_requests": 1},
+                    "providers": {
+                        "fast": {"model": "fake", "api_key": "fake"},
+                        "strong": {"model": "fake", "api_key": "fake"},
+                    },
+                }
+            }
+        )
+        fast = root.with_tier("fast")
+        strong = root.with_tier("strong")
+        fast._build_openai_client = lambda _: SimpleNamespace(  # type: ignore[method-assign]
+            chat=SimpleNamespace(completions=FakeCompletions())
+        )
+        strong._build_openai_client = lambda _: SimpleNamespace(  # type: ignore[method-assign]
+            chat=SimpleNamespace(completions=FakeCompletions())
+        )
+
+        self.assertEqual(fast.complete("system", "user", max_tokens=20), "Hello world")
+        with self.assertRaises(LLMBudgetExceeded):
+            strong.complete("system", "user", max_tokens=20)
+
+        self.assertEqual(root.request_budget_usage["requests"], 1)
+        self.assertEqual(strong.request_budget_usage, root.request_budget_usage)
+
+    def test_llm_reserved_token_budget_blocks_before_provider_request(self) -> None:
+        client = LLMClient.from_config(
+            {
+                "llm": {
+                    "budget": {"max_reserved_tokens": 80},
+                    "providers": {
+                        "fast": {"model": "fake", "api_key": "fake"}
+                    },
+                }
+            }
+        )
+        completions = FakeCompletions()
+        client._build_openai_client = lambda _: SimpleNamespace(  # type: ignore[method-assign]
+            chat=SimpleNamespace(completions=completions)
+        )
+
+        with self.assertRaises(LLMBudgetExceeded):
+            client.complete("system", "user", max_tokens=20)
+
+        self.assertEqual(completions.request, {})
+        self.assertEqual(client.request_budget_usage["requests"], 0)
 
     def test_llm_semantic_config_never_contains_key_or_url_credentials(self) -> None:
         client = LLMClient.from_config(

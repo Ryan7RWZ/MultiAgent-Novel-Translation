@@ -1,10 +1,10 @@
 # MANT 项目交接与当前进度
 
-> 快照日期：2026-07-19（Asia/Shanghai）
+> 快照日期：2026-07-20（Asia/Shanghai）
 >
-> 分支：`agent/normalize-txt-encoding`，基于 `origin/main` 的 `d581597`
+> 分支：`agent/harden-text-decoding`，基于与 `origin/main` 一致的 `cc1811f`
 >
-> 状态：核心 M1、章节多 Agent 链路、流式事件、实时监控、浏览器工作台、并发执行、checkpoint/manifest 与质量闭环已合入 `main`。当前分支已完成所有用户 TXT 入口的编码识别与 UTF-8 归一、配套文档、离线回归和一次完整 DeepSeek 实译，等待 PR 审查。
+> 状态：核心 M1、章节多 Agent 链路、流式事件、实时监控、浏览器工作台、并发执行、checkpoint/manifest、质量闭环和 TXT 编码归一均已合入 `main`。当前分支已加固 TXT 不可信编码边界、revision 结构化局部补丁、共享供应商请求硬预算，并把已验证的本地片段并发提高到 20；unit-ID v5 已完成 10 片定向 canary 和 253 片浏览器真实全链路，技术链路成功，最终 249/253 片 QA pass、4 片仍需人工复核。
 
 ## 1. 项目目标
 
@@ -87,7 +87,7 @@ MultiAgent-Novel-Translation/
 │  ├─ textio.py                 # 用户 TXT 编码识别与 UTF-8 工作副本转换
 │  ├─ workflow/                 # TranslationState 与 LangGraph 章节工作流
 │  └─ cli.py                    # m1-pipeline/baseline/translate-chapter/resume-run/monitor
-└─ tests/                       # 71 项 pytest / 44 项 unittest，含多编码 TXT、切片、记忆、流程、返工、事件和质量规则
+└─ tests/                       # 83 项 pytest / 53 项 unittest，含多编码 TXT、切片、记忆、流程、返工、事件和质量规则
 ```
 
 `data/` 中的运行内容默认被忽略；目录中现有 M1 演示产物是本地验证用事实，不应误认为待提交的数据集。
@@ -96,11 +96,11 @@ MultiAgent-Novel-Translation/
 
 最近提交（由新到旧）：
 
-1. `d581597`（2026-07-19）— 合并 PR #5：质量闭环加固与浏览器工作台重建。
-2. `adb8d56`（2026-07-19）— 修复 Editor/revision/QA 质量闭环并记录真实 20 片复验。
-3. `578be8c`（2026-07-18）— 合并 PR #4：并发执行、checkpoint 与 manifest 加固。
-4. `4a3cf9c`（2026-07-18）— 完成长文本有界并发与定点恢复。
-5. `51f340e`（2026-07-18）— 合并 PR #3：安全的逐片长文本工作流。
+1. `cc1811f`（2026-07-19）— 合并 PR #6：用户 TXT 编码识别与 UTF-8 归一。
+2. `3a0d856`（2026-07-19）— 接入多编码 TXT、浏览器原始字节解码与完整实译记录。
+3. `d581597`（2026-07-19）— 合并 PR #5：质量闭环加固与浏览器工作台重建。
+4. `adb8d56`（2026-07-19）— 修复 Editor/revision/QA 质量闭环并记录真实 20 片复验。
+5. `578be8c`（2026-07-18）— 合并 PR #4：并发执行、checkpoint 与 manifest 加固。
 
 重要提示：`agent/observable-streaming-workbench` 的功能已经通过 PR #1/#2 合入 `main`。此前关于“尚未进入 main”或“新增文件尚未跟踪”的描述均为历史状态。
 
@@ -111,7 +111,7 @@ MultiAgent-Novel-Translation/
 - 已建立 Python 包、CLI、配置示例、文档、数据目录说明和测试骨架。
 - 已创建真实 `config/settings.yaml`，并通过 `.gitignore` 排除；配置支持 fast/strong 模型层、内存、流程和可观测性参数。
 - 当前本机配置通过 `api_key_env` 引用环境变量；文档、事件与日志均未保存实际密钥值。
-- CLI 已有四个正式子命令：`m1-pipeline`、`baseline`、`translate-chapter`、`monitor`。
+- CLI 已有五个正式子命令：`m1-pipeline`、`baseline`、`translate-chapter`、`resume-run`、`monitor`。
 
 ### 5.2 M1 数据与记忆
 
@@ -455,7 +455,7 @@ dashboard 内嵌 JavaScript new Function   → 语法通过
   无重复，JavaScript 可由 Node 解析，观测测试 12/12 通过，`start_mant.bat --check`
   通过。当前 Codex 会话没有可用浏览器实例，尚未完成截图、拖放和响应式视觉验收。
 
-### 5.16 用户 TXT 编码统一（当前分支，2026-07-19）
+### 5.16 用户 TXT 编码统一（已合入 main，2026-07-19）
 
 - 新增 `mant.textio`：按 BOM、严格 UTF-8、chardet 和确定性候选识别用户
   TXT，覆盖 GBK/GB18030、Big5、UTF-16/32、Shift-JIS/CP932、EUC-JP、
@@ -473,7 +473,7 @@ dashboard 内嵌 JavaScript new Function   → 语法通过
   浏览器解码边界。`.venv/bin/pytest -q` 为 71 passed，`unittest`
   为 44 tests，`compileall` 和 `git diff --check` 通过；未调用真实 LLM。
 
-### 5.17 DeepSeek V4 完整 TXT 实译（当前分支，2026-07-19）
+### 5.17 DeepSeek V4 完整 TXT 实译（记录已合入 main，2026-07-19）
 
 用户明确授权将 `data/raw/斗罗大陆外传神界传说._副本.txt` 全文发送给
 DeepSeek 并承担费用。本次配置 fast=`deepseek-v4-flash`、
@@ -502,15 +502,186 @@ strong=`deepseek-v4-pro`、全局并发 4、checkpoint/manifest 开启、
   `data/exports/deepseek-v4-full/`，trace 分别位于 `data/traces/` 与
   `data/traces/recovery-v1/`，manifest 位于 `data/runtime/runs/`。
 
+以上产物属于执行实译 Agent 的本地 Git 忽略数据；当前 Windows checkout 的
+`data/exports` 仅含 `.gitkeep`，且没有 `data/traces` / `data/runtime`，因此本次
+接手只能核对已提交的统计记录，不能重新读取原始译文、trace 或 manifest 验证数字。
+
+### 5.18 TXT 不可信检测失败边界加固（当前分支，2026-07-19）
+
+- 接手时当前 Python 3.14 环境没有安装 PR #6 新增的核心依赖 `chardet`；编码回归
+  因而有 6 项失败，且旧的固定候选顺序会把 Big5/日文/韩文等字节误当 GB18030
+  “成功”解成乱码。已同步 `chardet 7.4.3`；该依赖现在由 `mant.textio` 直接导入，
+  安装不完整会在入口导入/自检阶段明确失败，而不是悄悄切换到不安全猜测。
+- 删除“所有旧编码逐个试到能解码为止”的兜底，只接受 chardet 可信候选及同一
+  编码家族的严格兼容扩展（如 GB2312/GBK → GB18030）。极短 CP1252 仅在 ASCII
+  字母占优且存在 CP1252 标点区字节时有限接受；无可信候选直接抛
+  `TextDecodingError`。
+- 新增“不可信检测不得盲选旧编码”和“检测家族可回退严格超集”两项回归。
+  当前 Windows 实测：`pytest` 73 passed、`unittest` 44 tests OK、compileall、
+  `start_mant.bat --check` 和 `git diff --check` 通过。本地无密钥
+  `config/settings.yaml` 已由示例恢复且继续被 Git 忽略；未调用 DeepSeek。
+
+### 5.19 Revision 结构化补丁与供应商请求硬预算（当前分支，2026-07-19）
+
+- Translator revision mode 不再接受模型返回的“完整译文”普通文本，而是要求
+  `operations` JSON；支持 `replace` / `insert_before` / `insert_after` / `delete`。
+  每个 anchor 必须从当前译文逐字复制，并在顺序应用时恰好出现一次；缺失、歧义、
+  空操作、未知 action、超出 8 个操作或应用后无变化均拒绝整批补丁。
+- 首次普通文本、坏 JSON 或补丁校验失败时只做一次 1024-token 结构化修复请求；
+  仍无效则保留修订前完整译文并登记片段失败。真实片 13 的 951/3071 半截普通文本
+  现在会被协议层直接拒绝，不再只依赖下游 0.5 长度比例兜底。
+- revision 配置与修复 Prompt 已进入 checkpoint 语义，指纹升级到 v4，避免误复用
+  旧的整段重写结果。fake 回归覆盖成功补丁、半截普通文本后恢复、歧义锚点拒绝。
+- `llm.budget.max_requests` 和 `max_reserved_tokens` 在 fast/strong、所有并发 worker、
+  HTTP 重试及流中断完整重试间共享。每个真实 SDK 请求前原子预留；token 采用
+  prompt UTF-8 字节上界 + 64 消息余量 + completion `max_tokens` 的保守估算。
+  超限时抛 `LLMBudgetExceeded`，不会联网，也不会伪装成 `[DRAFT]` 成功。
+- CLI 元数据新增 `llm_request_budget`。可提交示例默认 0（不限并明确要求生产配置）；
+  本地忽略配置暂设 150 次请求和 1,500,000 保守 token，未保存密钥。
+- Windows 全量验证：`pytest` 77 passed、`unittest` 48 tests OK、compileall、YAML
+  解析、`start_mant.bat --check` 和 `git diff --check` 均通过；未调用 DeepSeek。
+
+### 5.20 片段并发提升至 20（当前分支，2026-07-20）
+
+- 一次性离线容量测试使用 253 片、六阶段各 253 个任务，共提交并完成 1,518 个
+  fake Agent 任务；每阶段都达到 `peak_in_flight=20`，0 失败、0 拒绝、0
+  checkpoint 错误，SQLite WAL 并发写入和最终片段顺序均正确，耗时约 14.5 秒。
+- 长期回归使用每阶段 21 片，确保六阶段都能填满 20 worker，同时减少测试时间；
+  覆盖乱序完成、确定性归并和并发 checkpoint 计数。
+- 可提交示例仍以 `enabled: false` 防止复制配置后意外产生付费并发，但开启后的
+  `global_max_in_flight` 和六阶段 worker 均提高到 20。本地忽略配置已设为
+  `enabled: true`、全局/六阶段 20，并开启 checkpoint 与 manifest。
+- 本地 `llm.budget` 暂保留 150 请求/1,500,000 保守 token，只适用于 20 片 canary；
+  253 片全文不能直接使用该预算，需按 canary 元数据外推后提高上限。
+- 全量验证：`pytest` 78 passed、`unittest` 48 tests OK、compileall、
+  `start_mant.bat --check` 与 `git diff --check` 通过。当前 checkout 没有
+  `source-first20.txt`，因此没有进行真实供应商 canary，也没有产生 API 费用。
+
+### 5.21 公开领域小说 40 片离线完整链路（当前分支，2026-07-20）
+
+- 因原 `source-first20.txt` 不在当前 checkout，从 Project Gutenberg 下载其标记为
+  “Public domain in the USA”的《西遊記》（eBook #23962）UTF-8 文本作为容量测试源；
+  去掉 Gutenberg 头尾说明后，从“第一回”开始按当前分片器边界截取前 40 片。
+  来源：`https://www.gutenberg.org/ebooks/23962`。
+- 生成的本地忽略文件为 `data/inputs/gutenberg-xiyouji-40segments.txt`：94,800 bytes、
+  32,432 字符、37,537 估算 token，40 片；单片 736–1,093 token、平均 938.85，
+  0 次硬切，边界为 33 blank-line / 4 heading / 2 paragraph / 1 document-end，
+  可逆回拼通过。SHA-256：
+  `88857cd5561357812eb78bc040d9d01e43408c83d20b9107488afe757f9cef74`。
+- 使用 `run-offline-xiyouji40-c20-20260720`、20 worker、fake LLM、`max_rework=0`
+  跑完整六阶段：Terminologist/Translate/Edit/Revision/Polish/QA 各 40 次，共提交并
+  完成 240 个任务，峰值并发 20，0 失败、0 拒绝、0 checkpoint 错误；40 份初译、
+  修订、润色和 QA 结果均齐全，fake QA 为 9.0/pass，耗时 8.966 秒。
+- 同 run ID 第二次运行命中 240/240 checkpoint，提交任务和 fake LLM 调用均为 0，
+  耗时 1.053 秒，确认 20 并发产物可完整恢复。该结果只证明编排/契约/恢复，不代表
+  真实译文质量；未调用 DeepSeek，也未产生 API 费用。
+
+### 5.22 DeepSeek V4 Flash 40 片、20 并发真实链路（当前分支，2026-07-20）
+
+用户明确同意提高并发后进行真实测试，并承担将上述 Project Gutenberg 公开领域
+《西遊記》40 片发送至 DeepSeek 的 API 费用。使用
+`run-deepseek-v4-c20-xiyouji40-20260720-v1`、fast/strong 均为
+`deepseek-v4-flash`、六阶段 20 worker、`max_rework=0`：
+
+- 首轮提交 180 个阶段任务、完成 180 个，峰值并发 20；142 成功、38 失败，另有
+  60 个任务被熔断拒绝。原因不是 20 并发或供应商限流，而是保守 token 预留在第
+  164 个真实请求后达到 2,999,719 / 3,000,000，导致后续 revision/polish 停止，
+  再由全局 20 次失败阈值拒绝余下 polish/QA。没有发现 429/503。
+- 同 run ID 保留首轮成功 checkpoint，将任务上限设为 150、全局失败阈值提高到
+  50、revision/polish 阶段阈值提高到 20 后补跑。第二轮命中 142 个 checkpoint，
+  仅提交 98 个失败/缺失任务；完成 98 个、0 拒绝、0 checkpoint 错误，峰值并发
+  20，耗时 47.6 秒。供应商请求 112 个，保守预留 2,011,980 / 3,000,000。
+- 补跑后 Translate/Edit/Polish/QA 均为 40/40 成功；Revision 为 30/40 成功，
+  Terminology 为 38/40 成功。第二轮中 7 个旧 revision 失败恢复，仍有 10 个补丁
+  因 anchor 匹配 2–3 次或应用后无变化而在一次结构化修复后被安全拒绝，均保留
+  修订前完整译文；两个术语任务仍因 1,024-token JSON 截断失败，但不影响下游
+  40 片覆盖。
+- 40 个 polish 和 40 个 QA checkpoint 全部成功；QA 覆盖率/token 覆盖率均为
+  1.0，加权分 8.56，33 pass / 7 rework。由于仍有 10 个安全回退记录且
+  `max_rework=0`，章级 verdict 正确保持 `rework`、`needs_human_review=true`。
+  译文为 158,948 bytes / 158,606 字符，润色/初稿长度比 0.9963。
+- 两轮共接受 276 个供应商请求；trace 中已完成及截断响应记录的 usage 合计
+  1,278,303 prompt + 134,918 completion = 1,413,221 token。准确费用以 DeepSeek
+  账单为准。真实产物、trace、checkpoint 与 manifest 均在 `data/` 下并被 Git 忽略。
+
+### 5.23 Revision unit-ID v5 与 QA 批注闭环（当前分支，2026-07-20）
+
+- 删除 revision 实际运行中由模型自由选择字符串 anchor 的不稳定定位方式。程序按
+  换行/句末把当前译文切成保留原始间隔的单元，生成唯一 `unit_id` 和正文
+  `expected_hash`；模型只能引用这些值返回 `replace_unit / insert_before_unit /
+  insert_after_unit / delete_unit`。所有操作先校验，再基于原快照一次性重建，重复
+  文本和前序替换不会改变后续定位。
+- 每个操作必须关联 `note_ids` 并覆盖本片全部事实批注；同一 unit 最多一个操作，
+  replace 长度比例和 insert 字符数有界。`no_change` 必须逐批注提供可校验的
+  unit/hash/quote 证据。首次失败后的唯一短重试会收到具体校验错误、上次无效输出、
+  有效 unit ID 和必须覆盖的 note ID，不再原样重复通用提示。
+- 供应商异常、空响应/截断仍返回 `ok=false` 并计入技术熔断；结构化补丁最终无效时
+  返回 `protocol_rejected`、保留完整初稿并写 semantic `segment_failure`，但调度任务
+  本身成功，因此不会再挤占后续 Polish/QA 的技术失败额度。
+- 补丁 applied/no-change 不再立即关闭 Editor 批注，而是进入
+  `revision_*_pending_qa`。QA Prompt 会逐条验证；该片 pass 后标记
+  `resolution=resolved / qa_resolution=verified`，rework 则重新打开。
+- 通用 checkpoint 继续使用 v4；revision unit 协议以只属于 revise 阶段的 v5 语义
+  叠加。回归已证明只修改 v5 Prompt 时 Terminology/Translate/Edit/Polish/QA 五个
+  checkpoint 命中，仅 Revision 重跑，避免协议迭代重付上游费用。
+- Terminologist 默认输出上限从 1,024 提高到 1,536 token，每片 Prompt/代码均限制
+  最多 24 个跨章高价值专名，按置信度和名称稳定裁剪，降低真实测试中的 JSON 截断。
+- 自动验证：`pytest` 83 passed、`unittest` 53 tests、compileall、示例 YAML、
+  `start_mant.bat --check` 和 `git diff --check` 通过。使用同一公开领域《西遊記》
+  40 片进行 fake 全链路：六阶段
+  各 40 次（含 40 次 unit-ID revision），共 240 个任务，峰值并发 20，0 失败、
+  0 拒绝、0 checkpoint 错误，QA 9.0/pass，40 条 Editor 批注全部由 QA 关闭，
+  耗时 7.932 秒；同 run 再跑 240/240 checkpoint 命中、0 新调用、0.508 秒。
+  上述离线回归没有调用 DeepSeek，也没有新增 API 费用。
+- 2026-07-20 已在用户明确授权后，用 DeepSeek V4 Flash 对旧 anchor 协议真实失败的
+  10 片执行 unit-ID v5 定向 canary；只复用旧 run 的 Translate/Edit checkpoint，
+  未重跑其余阶段。10 worker 下 9.801 秒完成，14 次供应商请求（含 4 次错误感知
+  修复），实际 119,178 prompt + 5,419 completion = 124,597 token；本地保守预留
+  408,500，未超过 20 请求/650,000 预留硬上限。7/10 通过确定性协议（6 applied、
+  1 no_change），0 provider error；旧协议在同 10 片为 0/10，因此真实遵循率从 0%
+  提高到 70%。3 个拒绝均安全保留原译稿：两片返回全部同文 replace（最终重建无
+  变化），一片先超出 8 operations、修复后又触发短单元 replace 的 5 倍长度保护。
+  trace 位于忽略目录 `data/traces/unit-v5-canary/`，run ID 为
+  `run-deepseek-v4-unit-v5-canary10-20260720-v1`。
+
+### 5.24 Unit-ID v5 253 片浏览器真实全链路（当前分支，2026-07-20）
+
+- 用户通过浏览器工作台提交 414,427-byte GB18030 TXT，run ID
+  `web-20260719T184030-e863c350`。253 片、20 worker、`max_rework=2` 在
+  463.174 秒内正常结束，CLI 退出码 0；共提交/完成 1,817 个阶段任务，峰值并发
+  20，2 个中间任务失败、0 调度拒绝、0 checkpoint 错误。1,970 次供应商请求共
+  保守预留 19,117,161 / 50,000,000 token；没有预算耗尽、熔断或 429/503。
+- 三轮 QA 从 228/253 pass、8.85 提升到 244/253（另 1 个中间 JSON 无效）、8.93，
+  最终为 249/253 pass、8.94、覆盖率 100%。片段 44/165/183/197 仍判 rework；达到
+  两轮上限后按设计输出 `qa_verdict=rework / needs_human_review=true`，不是进程失败。
+- 312 个 revision 任务中出现 50 次协议安全拒绝，涉及 39 片：30 次未覆盖全部
+  note ID、14 次补丁应用后无变化、2 次操作数超过 8、2 次同 unit 重复操作、
+  1 次 no-change evidence 引文无效、1 次短 unit 替换长度比例越界。35/13/2 次分别
+  位于第 0/1/2 轮，多数由后续重译恢复；最终仅片段 44/203 留有 semantic revision
+  failure，原稿均被安全保留。
+- 另有 6 个 `finish_reason=length` 截断事件，残稿全部丢弃；片段 49 的 revision
+  中间失败，片段 195 的 QA JSON 中间无效，后续质量循环已恢复。最终译文
+  684,803 字符、6,892 行，无 `[DRAFT]`、`[SEGMENT_ERROR]` 或代码围栏；仍包含
+  TXT 上传站声明/广告及括号内 4 个 CJK 字符“幽冥白虎”，说明正文清洗和纯英文
+  产物门禁仍需补强。
+- 本地忽略产物位于 `data/exports/web/demo_work/斗罗大陆外传神界传说-1/`，trace 为
+  `data/traces/web-20260719T184030-e863c350.jsonl`，manifest/checkpoint 位于
+  `data/runtime/`；均不进入提交。
+
 ## 6. 正在开发或尚未稳定的部分
 
-- 流式 LLM、机械切片、逐片下游、并发执行层、checkpoint、定点返工、质量闭环
-  和浏览器工作台已进入 `main`；当前分支增加 TXT 编码识别与 UTF-8 归一。
+- 流式 LLM、机械切片、逐片下游、并发执行层、checkpoint、定点返工、质量闭环、
+  浏览器工作台和 TXT 编码归一均已进入 `main`；当前分支加固编码不确定时的拒绝
+  边界、revision 结构化 patch、真实供应商请求硬预算和 20 worker 容量。
 - 253 片完整 GB18030 TXT 已使用 DeepSeek V4 Flash/Pro 跑完 1,520 次成功
   LLM 响应；并发调度、编码归一、确定性归并、跨进程 checkpoint 恢复、
   v3 指纹和 manifest 均由真实 run 验证。最终六阶段无失败且 QA 覆盖 100%，
   但 125/253 片被 QA 判 rework，尚未进行第二轮质量返工。
   `resume-run --stage qa --failed-only` 仍尚未在真实失败 run 上执行。
+- 公开领域《西遊記》40 片已用 DeepSeek V4 Flash 在六阶段 20 worker 下完成真实
+  压测；调度峰值 20、无 429/503、补跑 checkpoint 命中 142 次。旧 anchor 协议的
+  10/40 安全拒绝已推动 unit-ID v5 实现并完成同规模离线验证；对这 10 片的真实
+  v5 定向 canary 已达到 7/10 协议通过、3/10 安全拒绝、0 供应商错误。
 - macOS 命令行与浏览器 API 已验证；Windows `start_mant.bat` 的真实供应商启动、拖放与浏览器视觉交互仍需在 Windows 环境人工验收。
 - 浏览器工作台通过 API 和 JavaScript 语法测试，但当前会话没有可用的浏览器自动化运行时，因此尚缺一次真实点击、拖放、滚动和视觉布局检查。
 - 现有架构/路线图文档有少量“骨架阶段”“三个子命令”等旧描述，需要在功能提交稳定后统一校正。
@@ -521,13 +692,14 @@ strong=`deepseek-v4-pro`、全局并发 4、checkpoint/manifest 开启、
 ### 翻译质量与长文本
 
 - Terminologist/Translator/Editor/revise/Polisher/QA 已逐片有界并发并确定性归并，支持
-  调用次数预算、阶段失败熔断、v3 checkpoint 和 QA manifest 恢复；仍缺精确
-  RPM/TPM、总 Prompt/金额预算、供应商 tokenizer 与跨章节任务队列。
+  片段任务预算、共享供应商请求/token 预留硬预算、阶段失败熔断、v4 checkpoint 和
+  QA manifest 恢复；仍缺精确 RPM/TPM、账单金额、供应商 tokenizer 与跨章节任务队列。
 - Polisher 尚未实现严格的专有名词保护和风格指纹；Terminologist 缺 few-shot、缓存和置信度校准。
 - 流中断或 `finish_reason=length` 会完整重试并拒绝残稿；QA 有一次 JSON 修复，
   Editor 有紧凑恢复，Terminologist 等其他结构化 Agent 仍只有解析降级。
 - QA 阈值已配置化，返工意见有基础的“待落实/已由翻译落实/已由修订落实”状态；
-  仍缺 QA 验证后关闭、人工重开以及按更多问题类型选择回环落点的完整生命周期。
+  revision applied/no-change 已由 QA 验证后关闭或重新打开；仍缺人工重开以及按更多
+  问题类型选择回环落点的完整生命周期。
 
 ### 记忆与检索
 
@@ -548,7 +720,8 @@ strong=`deepseek-v4-pro`、全局并发 4、checkpoint/manifest 开启、
   `resume-run --stage qa --failed-only`，但浏览器尚未暴露该入口。
 - 浏览器任务表位于内存，重启后 job 状态丢失；trace 文件仍在，但没有完整的运行历史 UI。
 - 当前只允许一个并发任务；没有用户认证、TLS、租户隔离或部署方案，因此只能作为本机工具使用。
-- 只在供应商返回 stream usage 且配置启用时才能得到 token 使用；尚无可靠的价格表和金额计算。
+- 只有供应商在流结果中返回 usage 时才能得到实际 token 使用；本次 DeepSeek canary
+  已取得该数据，但硬预算仍使用保守预留值，且尚无可靠价格表、缓存计价和准确金额计算。
 - `python-dotenv` 已声明为依赖，但 CLI 配置加载尚未显式调用 `load_dotenv()`；当前可靠方式仍是系统/进程环境变量。
 - `start_mant.bat` 与当前 DeepSeek 官方配置统一使用 `DEEPSEEK_API_KEY`；若以后改用其他 `api_key_env`，需同步调整批处理刷新逻辑。
 
@@ -557,10 +730,9 @@ strong=`deepseek-v4-pro`、全局并发 4、checkpoint/manifest 开启、
 1. **Editor 紧凑恢复分支尚缺真实触发**：真实 20 片中 20/20 正常审校均在首个
    有界响应内完成，证明硬限制解决旧截断；但本次没有触发 768-token 紧凑恢复，
    该异常分支仍只有 fake 回归证据。
-2. **成本与上下文风险**：五个角色已有片段调用次数上限，Terminologist 已分片；
-   系统仍没有供应商精确 tokenizer、可靠 token/金额上限。已经在途的请求
-   不会被调用预算强制中止，LLMClient 内部重试也不单独计数，因此预算是片段任务
-   派发上限而不是绝对供应商请求或费用上限。
+2. **成本与上下文风险**：片段任务上限之外已增加跨 tier/worker/重试共享的供应商
+   请求数与保守 token 硬上限；但系统仍没有供应商精确 tokenizer、缓存计价和可靠
+   金额上限。已经在途的请求不会被强制中止，硬预算只阻止后续新请求。
 3. **记忆闭环不完整**：能读术语/TM/故事设定，但章节成功后不会自动形成下一章可用的新记忆。
 4. **重试策略仍需细化**：残稿/截断已经安全重试并拒收，片段失败数量可熔断新派发；
    但外层重试尚未按 HTTP 状态细分，也没有共享速率桶或 jitter 退避。
@@ -574,9 +746,10 @@ strong=`deepseek-v4-pro`、全局并发 4、checkpoint/manifest 开启、
 10. **并发 token 持久化局部乱序**：本次 27,084 条 trace 有 44 个 sequence 局部
     倒序点，均为不同 call 的 token 合批 flush；call 身份无串扰、业务状态不受影响，
     但严格历史回放应按 sequence 排序。
-11. **revision 完整输出契约仍不够强**：真实片 13 调用正常完成，却只返回完整初稿
-    的 30.97%；完整性保护正确拒绝了局部内容，但事实意见没有得到落实。下一版应
-    使用更强的完整译文契约，或让模型返回可由代码确定性应用的结构化 patch。
+11. **unit-ID v5 真实遵循率仍为 70%**：旧 anchor 协议失败的 10 片经 v5 canary
+    已有 7 片通过，且 3 片失败都未污染初稿；剩余模式为两片“同文 replace”没有改用
+    `no_change`，以及一片 9 operations/短标题单元长度保护。下一轮应先把全同文操作
+    安全归一为待 QA 的 no-change，并优化短单元/操作数提示，再复测同一 10 片。
 12. **QA 现在采取保守放行**：7.0/6.0 临界且模型判 rework 的回归已修复；代价是
     模型偶发过严时会增加返工/人工复核，需要后续评估误拒率而不能直接放宽安全规则。
 
@@ -590,8 +763,10 @@ strong=`deepseek-v4-pro`、全局并发 4、checkpoint/manifest 开启、
 | 五个业务 Agent 共用同一片段序列 | 把所有模型输入/输出限制在片段预算内；按 ordinal 确定性归并，并能把失败和 QA 精确定位到单片 |
 | 并发只发生在同一阶段的不同片段间 | 保持 translate→edit→polish→QA 数据依赖清晰，同时获得主要吞吐收益 |
 | 每个 worker 创建独立 Agent/LLMClient | 避免 `last_notes`、调用 ID 和 token 计数等可变状态在线程间串扰 |
-| checkpoint 使用 v3 语义指纹 + manifest | 同 run 可定向恢复，生成参数、Prompt 或输入变化时安全失效；manifest 冻结恢复所需上游状态 |
+| checkpoint 使用通用 v4 + revise 专属 v5 语义 + manifest | 同 run 可定向恢复；revision 协议单独迭代不使上游 checkpoint 失效，下游按实际输入自然失效；manifest 冻结恢复所需上游状态 |
 | Editor 后按需进入 Translator revision mode | 让事实性漏译/误译有明确改稿责任；无问题片段零调用，Polisher 只负责语言 |
+| revision 只引用程序生成 unit ID/hash | 避免模型用半截“完整译文”覆盖正确初稿，也不再让模型猜唯一 anchor；代码基于原快照确定性应用或整体拒绝 |
+| LLMClient 副本共享供应商请求/token 预留预算 | 片段任务预算覆盖不到 HTTP/残稿重试；联网前原子预留才能形成并发下的真实硬边界 |
 | QA 只返工失败片段 | 长文本中局部问题不应放大为全章四阶段重跑，显著降低费用与延迟 |
 | 截断或流中断后丢弃残稿并完整重试 | 部分译文没有可靠的自动续接边界；拒绝残稿比把缺失内容悄悄导出更安全 |
 | 润色稿做片段长度比例检查 | 快速拦截最常见的截断和异常膨胀；越界时只回退对应定点修订稿，并迫使 QA/人工复核 |
@@ -610,35 +785,51 @@ strong=`deepseek-v4-pro`、全局并发 4、checkpoint/manifest 开启、
 
 ## 10. 最近修改的文件
 
-以下是当前分支相对 `main`（`578be8c`）的变更清单。
+以下是当前分支相对 `main`（`cc1811f`）的变更清单。
 
 ### 本分支修改
 
-- 文档与配置：`.agents/PROGRESS.md`、`README.md`、
-  `config/settings.example.yaml`、`docs/architecture.md`、`docs/agent-design.md`、
-  `docs/concurrency.md`、`docs/observability.md`、`docs/ui-acceptance.md`、
-  `pyproject.toml`。
-- Agent：`src/mant/agents/editor.py`、`qa.py`、`translator.py`。
-- 工作流与执行：`src/mant/workflow/graph.py`、`state.py`、
-  `src/mant/execution/models.py`。
-- 浏览器工作台：`src/mant/observability/dashboard.py`、
-  `tests/test_observability.py`。
+- `.agents/PROGRESS.md`：纠正 PR #6 合并后的状态，并记录本分支全部加固和验证。
+- `README.md`、`docs/agent-design.md`、`docs/architecture.md`、`docs/concurrency.md`：
+  记录 revision patch 契约、v4 指纹与供应商请求硬预算。
+- `config/settings.example.yaml`：增加 revision patch 与 `llm.budget` 配置示例，并把
+  opt-in 后的全局/六阶段并发容量提高到 20。
+- `src/mant/agents/translator.py`：生成 unit-ID/hash 单元表，校验、错误感知修复并基于
+  原快照一次性应用局部补丁；支持带证据 no-change 和语义拒绝。
+- `src/mant/agents/qa.py`、`src/mant/agents/terminologist.py`：QA 验证后关闭 revision
+  批注；术语每片 24 条/1,536-token 双重硬限制。
+- `src/mant/workflow/state.py`：记录 technical/semantic 片段失败语义。
+- `src/mant/workflow/graph.py`：接入 revision 配置并把 checkpoint 指纹升级为 v4。
+- `src/mant/llm/client.py`、`src/mant/llm/__init__.py`：共享请求/token 预留预算及
+  `LLMBudgetExceeded`。
+- `src/mant/cli.py`：在导出元数据中记录供应商请求预算使用量。
+- `src/mant/textio.py`：要求核心检测依赖，删除跨编码家族盲猜，仅保留可信候选与
+  严格兼容扩展。
+- `tests/test_textio.py`、`tests/test_quality_loop.py`、`tests/test_observability.py`：增加
+  编码拒绝、unit-ID patch、重复文本/陈旧 hash、错误感知修复、no-change/QA、
+  stage-local checkpoint 及跨客户端硬预算回归。
+- `tests/test_translator_feedback.py`：增加术语 Prompt 与代码双重数量上限回归。
+- `tests/test_execution.py`：增加六阶段 20 worker、确定性归并及并发 checkpoint 回归。
+- 本地 `config/settings.yaml` 已开启全局/六阶段 20 worker、checkpoint/manifest，
+  当前本地配置为 1,000 请求/10,000,000 保守 token、150 个片段任务和 50 次全局
+  失败上限；继续被 Git 忽略，不进入提交。本次 canary 在内存中单独收紧为
+  20 请求/650,000 保守 token，没有改写该文件。
 
 ### 本分支新增
 
-- `tests/test_quality_loop.py`：Editor 紧凑恢复、定点修订、Polisher 职责隔离和
-  QA 保守放行回归测试。
-- `src/mant/observability/dashboard.html`：零构建链浏览器翻译制作台页面。
+- 无新增跟踪文件。
 
 ## 11. 下一步最合理的开发顺序
 
-1. **加固 revision 完整输出契约**：针对真实片 13 的 0.3097 长度比例，优先设计
-   可确定性应用的结构化 patch 或更强的完整译文返回/恢复协议；补 fake 回归后，
-   利用同一 run 的 checkpoint 只重试失败及受影响片段，避免重复支付全部 20 片。
+1. **收敛 unit-ID v5 剩余三类真实拒绝**：把覆盖全部 note 且最终全同文的合法
+   replace 归一为 `no_change_pending_qa`（仍必须经 QA 验证），在修复提示中明确要求
+   同文时使用 no-change evidence；同时针对章节标题等短单元调整操作上限/长度约束。
+   补齐回归后继续复用旧 checkpoint 复测同一 10 片，不重付 Translate/Edit 费用。
 2. **真实验证失败恢复**：用新的小样 run 覆盖 checkpoint 命中和失败阶段恢复；当前
    CLI 只支持 QA failed-only，需先决定是否把安全恢复扩展到 edit/polish。
-3. **补精确供应商限流与费用保护**：实现共享 RPM/TPM 速率桶、429 Retry-After +
-   jitter、stream usage 聚合、模型价格表和金额上限，再考虑 253 片真实复验。
+3. **补精确供应商限流与金额保护**：在现有请求/token 硬上限上实现共享 RPM/TPM
+   速率桶、429 Retry-After + jitter、stream usage 聚合、版本化价格表和金额上限，
+   再考虑 253 片真实复验。
 4. **完成 Windows/浏览器人工视觉验收**：`start_mant.bat --check` 已通过；仍需在
    可用浏览器中实际点击、拖放、缩放、复制/下载并核对布局、密钥继承和子进程回收。
 5. **完善运行控制**：增加浏览器取消/恢复按钮、任务表持久化、运行中增量 manifest 和从 trace 重建历史。
@@ -672,4 +863,4 @@ cmd /c start_mant.bat --check
 7. `src/mant/observability/` 与 `dashboard.py`（监控/浏览器）
 8. `tests/`（当前行为契约）
 
-本地运行前确认 `config/settings.yaml` 存在，且配置指定的环境变量在**当前进程**可见。不要打印变量值。双击 `start_mant.bat` 可打开本地浏览器工作台；也可把 UTF-8 `.txt` 拖到该批处理文件上直接翻译。
+本地运行前确认 `config/settings.yaml` 存在，且配置指定的环境变量在**当前进程**可见。不要打印变量值。双击 `start_mant.bat` 可打开本地浏览器工作台；也可把受支持编码的 `.txt` 拖到该批处理文件上直接翻译。

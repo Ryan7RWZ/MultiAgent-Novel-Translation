@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import unittest
 
 from mant.agents.base import AgentTask
@@ -33,6 +34,29 @@ class ExistingTermMemory:
                 confidence=1.0,
             )
         }
+
+
+class TermListLLM:
+    def __init__(self) -> None:
+        self.calls: list[tuple[str, dict[str, object]]] = []
+        self.last_notes: list[str] = []
+
+    def complete(self, system: str, user: str, **kwargs: object) -> str:
+        self.calls.append((system, dict(kwargs)))
+        return json.dumps(
+            {
+                "terms": [
+                    {
+                        "source": f"术语{index}",
+                        "target": f"Term {index}",
+                        "category": "other",
+                        "confidence": confidence,
+                    }
+                    for index, confidence in enumerate((0.2, 0.9, 0.7, 1.0, 0.8))
+                ]
+            },
+            ensure_ascii=False,
+        )
 
 
 class TestTranslatorFeedback(unittest.TestCase):
@@ -79,6 +103,23 @@ class TestTranslatorFeedback(unittest.TestCase):
             AgentTask("demo", "1", "chapter", "他拜入青玄宗。", {"mode": "extract"})
         )
         self.assertEqual(result.output["glossary"], {"青玄宗": "Azure Profound Sect"})
+
+    def test_terminologist_enforces_prompt_and_code_term_bounds(self) -> None:
+        llm = TermListLLM()
+        agent = TerminologistAgent(llm)  # type: ignore[arg-type]
+        agent.max_terms = 3
+        result = agent.run(
+            AgentTask("demo", "1", "1#seg0000", "包含许多专名的原文。")
+        )
+
+        self.assertTrue(result.ok)
+        self.assertIn("本次最多返回 3 条", llm.calls[0][0])
+        self.assertEqual(llm.calls[0][1]["max_tokens"], 1536)
+        self.assertEqual(
+            [item["source"] for item in result.output["new_terms"]],
+            ["术语3", "术语1", "术语4"],
+        )
+        self.assertTrue(any("稳定保留前 3 条" in note for note in result.notes))
 
 
 if __name__ == "__main__":

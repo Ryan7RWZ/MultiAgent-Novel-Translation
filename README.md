@@ -144,18 +144,26 @@ set DEEPSEEK_API_KEY=你的key
   见 [确定性初始切片设计](docs/segmentation.md)。
 - Terminologist、Translator、Editor、Translator 定点修订、Polisher、QA 复用同一组
   segment；术语候选先逐片抽取再确定性归并。Editor 的事实性意见先由 Translator
-  revision mode 定点修订，Polisher 只处理语言层问题；润色稿长度异常会回退对应
-  修订稿，QA 按片评分后加权归并。`workflow.min_polished_segment_ratio`
+  revision mode 处理：代码先把当前译文按句子/换行生成稳定 `unit_id + expected_hash`，
+  模型只能引用这些 ID 返回局部补丁，代码基于原快照一次性应用；普通文本、陈旧 ID、
+  hash 不匹配或无变化补丁不会覆盖当前译文。协议拒绝属于语义告警，不占技术熔断
+  额度；已应用/无需修改的批注只有在该片 QA 通过后才关闭。Polisher 只处理语言层
+  问题；润色稿长度异常会回退对应修订稿，QA 按片评分后加权归并。`workflow.min_polished_segment_ratio`
   / `max_polished_segment_ratio` 可调整完整性阈值，provider 的
   `partial_retries` 控制残稿完整重试。
 - `agents.*` 控制角色级生成参数；当前 Editor 使用有数量/字段长度上限的
   1536-token JSON object，并在截断或 schema 无效时改用一次 768-token 紧凑恢复；
+  Terminologist 每片最多返回 24 个高价值术语且代码再次裁剪，输出上限为 1536 token；
   QA 使用 768-token 紧凑 JSON 和一次短修复，阈值可配置且不会覆盖模型明确的
   `rework`。本地 DeepSeek 配置对五个业务角色显式关闭思考模式。这些参数都会进入
   checkpoint 语义指纹。
 - `concurrency.*` 控制六个片段阶段的有界并发、阶段独立失败预算、SQLite
   checkpoint。并发任务可以乱序完成，但结果始终按片段序号归并；QA 返工只重跑
-  失败片段。配置与恢复方法见 [长文本并发执行设计](docs/concurrency.md)。
+  失败片段。示例配置保持 opt-in，但开启后全局及六阶段容量均为 20；配置与恢复
+  方法见 [长文本并发执行设计](docs/concurrency.md)。
+- `llm.budget.max_requests` 与 `max_reserved_tokens` 在 fast/strong、并发 worker 和
+  供应商重试之间共享；达到上限会在下一个真实 SDK 请求发出前硬拒绝。token 预留
+  使用 prompt UTF-8 字节上界加 completion `max_tokens`，因此是保守上限而非账单预测。
 
 ### 4.3 五个子命令
 
@@ -225,7 +233,7 @@ mant translate-chapter --config config/settings.yaml \
   同一个正式 CLI 子进程，而不是维护第二套翻译逻辑。监控重启后也能展示最近
   的历史事件。
 - `resume-run` 会校验原文未变化，从 manifest 恢复上游状态，并复用 QA 成功
-  checkpoint；旧版（指纹 v1）且没有 manifest 的运行不能直接使用此入口。
+  checkpoint；没有 manifest 且使用旧指纹的运行不能直接使用此入口。
 
 监控默认只监听 `127.0.0.1`。追踪中不记录 Prompt 正文或 API key；密钥字段
 还会在持久化前递归脱敏。完整事件说明见 [可观测性文档](docs/observability.md)。

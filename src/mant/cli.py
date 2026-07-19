@@ -195,6 +195,7 @@ def cmd_translate_chapter(args: argparse.Namespace) -> int:
 
     memory = None
     observer = None
+    llm_client = None
     try:
         from mant.observability import create_observer
         from mant.workflow import run_chapter
@@ -216,10 +217,11 @@ def cmd_translate_chapter(args: argparse.Namespace) -> int:
                 _max_trace_sequence(trace_dir / f"{args.run_id}.jsonl")
             )
         memory = _build_memory(cfg)
+        llm_client = _build_llm(cfg)
         final = run_chapter(
             work_id,
             input_path,
-            _build_llm(cfg),
+            llm_client,
             memory,
             chapter_id=chapter_id,
             max_rework=max_rework,
@@ -274,6 +276,7 @@ def cmd_translate_chapter(args: argparse.Namespace) -> int:
             "segment_failures": final.get("segment_failures") or [],
             "rework_segment_indices": final.get("rework_segment_indices") or [],
             "execution": final.get("execution_stats") or {},
+            "llm_request_budget": llm_client.request_budget_usage,
             "resume": {
                 "resumed": resume_state is not None,
                 "stage": getattr(args, "resume_stage", "") if resume_state else "",

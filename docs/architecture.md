@@ -152,7 +152,11 @@ sequenceDiagram
 
 - **批注驱动返工**：QA 判 rework 时必须给出结构化批注（错误位置、类型、修改建议），追加到 `review_notes`；翻译节点在下一轮把批注作为硬约束注入 Prompt，而不是盲目重译。
 - **职责闭环**：Editor 的漏译、误译、专名及 high 意见由 Translator revision mode
-  定点落实并标记 `resolution`；Polisher 只接收非 high 的语言类意见。
+  以结构化局部补丁落实。程序先把译文切成带 `unit_id + expected_hash` 的稳定单元，
+  模型只能引用 ID，代码基于原快照一次性重建，不再让模型猜唯一字符串位置。
+  `protocol_rejected` 安全保留原稿并形成语义告警，但不占技术熔断额度；补丁应用或
+  no-change 先标记为待 QA 验证，只有该片 QA 通过才关闭原批注。Polisher 只接收
+  非 high 的语言类意见。
 - **分片完整性**：`draft_segments`、`revised_segments` 与 `polished_segments` 必须和
   原文片段等长；润色稿字符比例越界时只回退对应修订稿。流中断或输出上限产生的
   残稿不得进入状态。
@@ -172,6 +176,8 @@ sequenceDiagram
 - **执行器（execution）**：每个片段任务创建独立 Agent/LLMClient，在阶段 worker
   和全局在途上限内并发；输入哈希匹配时复用 SQLite checkpoint，达到调用预算或
   失败阈值后停止派发。详细契约见 [concurrency.md](./concurrency.md)。
+- **供应商请求预算**：各 worker 的 LLMClient 保留独立流状态，但共享真实请求预算；
+  SDK 重试和残稿完整重试均逐次预留请求数与保守 token 上界，超限时在联网前拒绝。
 
 各 Agent 的详细职责、输入输出契约与 Prompt 设计见 [agent-design.md](./agent-design.md)。
 
@@ -276,6 +282,7 @@ erDiagram
 | 配置键 | 消费方 | 说明 |
 | --- | --- | --- |
 | `llm.providers.*` | `LLMClient.from_config` | 分 `fast` / `strong` 两档模型（型号、密钥、单价等） |
+| `llm.budget.*` | `LLMClient` | 跨档位/worker/重试共享的真实请求数与保守 token 预留硬上限 |
 | `memory.sqlite_path` | MemoryHub | SQLite 文件路径；换 Postgres 时替换为连接串 |
 | `memory.faiss_index_dir` | MemoryHub | FAISS 索引目录 |
 | `pipeline.raw_dir` / `pipeline.aligned_dir` / `pipeline.glossary_dir` | 管道四步 | 语料与产物目录 |

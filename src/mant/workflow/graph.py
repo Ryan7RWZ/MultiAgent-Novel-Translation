@@ -15,8 +15,9 @@
       ``story_bible`` / ``tm_matches`` / ``prev_summary``；
     - ``EditorAgent``：``{"review_notes": list[dict]}``（只提意见不改稿）；
       context 键 ``draft``（必需）/ ``glossary``；
-    - ``TranslatorAgent`` 的 revision mode：``{"draft": str}``；只按 Editor
-      的事实性意见定点修订，不承担文学润色；
+    - ``TranslatorAgent`` 的 revision mode：``{"draft": str,
+      "revision_status": str}``；只按 Editor 的事实性意见引用程序生成 unit ID
+      定点修订，不承担文学润色；
     - ``PolisherAgent``：``{"polished": str}``；context 键 ``draft``（必需）/
       语言层 ``review_notes``；
     - ``QAAgent``：``{"qa_score": float, "qa_verdict": "pass"|"rework",
@@ -132,6 +133,10 @@ def _notes_for_segment(
 
 
 _RESOLVED_NOTE_STATES = {"translation_applied", "revision_applied", "resolved"}
+_REVISION_QA_PENDING_STATES = {
+    "revision_applied_pending_qa",
+    "revision_no_change_pending_qa",
+}
 _FACTUAL_ISSUE_TYPES = {
     "omission",
     "mistranslation",
@@ -177,12 +182,18 @@ def _language_notes_for_segment(
 
 
 def _segment_failure(
-    *, stage: str, segment_id: str, segment_index: int, reason: str
+    *,
+    stage: str,
+    segment_id: str,
+    segment_index: int,
+    reason: str,
+    kind: str = "technical",
 ) -> dict[str, Any]:
     return {
         "stage": stage,
         "segment_id": segment_id,
         "segment_index": segment_index,
+        "kind": kind,
         "reason": reason,
     }
 
@@ -197,6 +208,37 @@ def _stable_hash(value: Any) -> str:
         default=str,
     ).encode("utf-8")
     return hashlib.sha256(encoded).hexdigest()
+
+
+def _ensure_review_note_id(
+    note: dict[str, Any],
+    *,
+    segment_id: str,
+    segment_index: int,
+    source: str,
+    round_no: int,
+    ordinal: int,
+) -> str:
+    """为 Editor/QA/旧 manifest 批注生成跨阶段稳定、无正文暴露的 ID。"""
+    existing = str(note.get("note_id") or "").strip()
+    if existing:
+        return existing
+    digest = _stable_hash(
+        {
+            "segment_id": segment_id,
+            "segment_index": segment_index,
+            "source": source,
+            "round": round_no,
+            "ordinal": ordinal,
+            "issue_type": note.get("issue_type"),
+            "severity": note.get("severity"),
+            "span": note.get("span"),
+            "suggestion": note.get("suggestion"),
+        }
+    )[:12]
+    note_id = f"note-{digest}"
+    note["note_id"] = note_id
+    return note_id
 
 
 def _selected_indices(state: TranslationState) -> list[int]:
@@ -293,6 +335,7 @@ def build_graph(
         "tier",
         "temperature",
         "max_tokens",
+        "max_terms",
         "structured_json",
         "thinking",
         "repair_attempts",
@@ -303,6 +346,10 @@ def build_graph(
         "compact_recovery_attempts",
         "compact_recovery_max_tokens",
         "compact_recovery_max_notes",
+        "revision_max_operations",
+        "revision_max_tokens",
+        "revision_repair_attempts",
+        "revision_repair_max_tokens",
         "pass_score_threshold",
         "min_dimension_score",
     }
@@ -326,6 +373,7 @@ def build_graph(
                 setattr(agent, key, str(value))
             elif key in {
                 "max_tokens",
+                "max_terms",
                 "repair_attempts",
                 "repair_max_tokens",
                 "max_review_notes",
@@ -334,13 +382,21 @@ def build_graph(
                 "compact_recovery_attempts",
                 "compact_recovery_max_tokens",
                 "compact_recovery_max_notes",
+                "revision_max_operations",
+                "revision_max_tokens",
+                "revision_repair_attempts",
+                "revision_repair_max_tokens",
             }:
                 parsed = int(value)
                 if key.endswith("tokens") and parsed < 1:
                     raise ValueError(f"Agent {role!r} 的 {key} 必须至少为 1")
                 if key.endswith("attempts") and parsed < 0:
                     raise ValueError(f"Agent {role!r} 的 {key} 不能小于 0")
-                if key not in {"repair_attempts", "compact_recovery_attempts"} and parsed < 1:
+                if key not in {
+                    "repair_attempts",
+                    "compact_recovery_attempts",
+                    "revision_repair_attempts",
+                } and parsed < 1:
                     raise ValueError(f"Agent {role!r} 的 {key} 必须至少为 1")
                 setattr(agent, key, parsed)
             elif key in {"temperature", "pass_score_threshold", "min_dimension_score"}:
@@ -390,6 +446,7 @@ def build_graph(
                     "COMPACT_RECOVERY_SYSTEM_PROMPT",
                     "REVISION_SYSTEM_PROMPT",
                     "REVISION_USER_PROMPT_TEMPLATE",
+                    "REVISION_REPAIR_SYSTEM_PROMPT",
                 )
                 if hasattr(agent_cls, name)
             },
@@ -406,22 +463,39 @@ def build_graph(
         role = _STAGE_TO_ROLE[stage]
         agent_cls = _AGENT_CLASSES[role]
         selected_client = client_for(role, agent_cls)
-        fingerprint = _stable_hash(
-            {
-                "fingerprint_version": 3,
-                "stage": stage,
-                "round": round_no,
-                "agent": agent_semantics(role, agent_cls),
-                "provider": client_semantics(selected_client),
-                "task": {
-                    "work_id": task.work_id,
-                    "chapter_id": task.chapter_id,
-                    "segment_id": task.segment_id,
-                    "source_text": task.source_text,
-                    "context": task.context,
+        fingerprint_payload: dict[str, Any] = {
+            "fingerprint_version": 4,
+            "stage": stage,
+            "round": round_no,
+            "agent": agent_semantics(role, agent_cls),
+            "provider": client_semantics(selected_client),
+            "task": {
+                "work_id": task.work_id,
+                "chapter_id": task.chapter_id,
+                "segment_id": task.segment_id,
+                "source_text": task.source_text,
+                "context": task.context,
+            },
+        }
+        # v4 旧字符串锚点仍保留在通用 Agent 语义里，确保 Translate/Edit
+        # checkpoint 不因 revision 协议单独升级而失效。v5 仅进入 revise 键。
+        if stage == "revise":
+            fingerprint_payload["stage_protocol"] = {
+                "name": "revision_unit_patch",
+                "version": 5,
+                "splitter": "sentence_or_newline_preserve_gaps_v1",
+                "prompts": {
+                    "system": TranslatorAgent.REVISION_UNIT_SYSTEM_PROMPT,
+                    "user": TranslatorAgent.REVISION_UNIT_USER_PROMPT_TEMPLATE,
+                    "repair": TranslatorAgent.REVISION_UNIT_REPAIR_SYSTEM_PROMPT,
+                },
+                "validation": {
+                    "replacement_ratio": [0.2, 5.0],
+                    "one_operation_per_unit": True,
+                    "all_notes_must_be_covered": True,
                 },
             }
-        )
+        fingerprint = _stable_hash(fingerprint_payload)
         return StageTask(
             run_id=str(state.get("run_id") or "unscoped"),
             segment_id=task.segment_id,
@@ -765,7 +839,9 @@ def build_graph(
                         reason="审校调用失败或输出无法解析",
                     )
                 )
-            for raw_note in result.output.get("review_notes") or []:
+            for ordinal, raw_note in enumerate(
+                result.output.get("review_notes") or [], start=1
+            ):
                 note = dict(raw_note) if isinstance(raw_note, dict) else {
                     "suggestion": str(raw_note)
                 }
@@ -776,6 +852,14 @@ def build_graph(
                 note["status"] = "open"
                 note["scope"] = "segment"
                 note["resolution"] = "pending"
+                _ensure_review_note_id(
+                    note,
+                    segment_id=segment_id,
+                    segment_index=idx,
+                    source="editor",
+                    round_no=round_no,
+                    ordinal=ordinal,
+                )
                 merged.append(note)
             emit_event(
                 "stage.segment_completed",
@@ -827,6 +911,15 @@ def build_graph(
             if not pending:
                 revised_parts[idx] = draft
                 continue
+            for ordinal, note in enumerate(pending, start=1):
+                _ensure_review_note_id(
+                    note,
+                    segment_id=segment_id,
+                    segment_index=idx,
+                    source=str(note.get("source") or "legacy"),
+                    round_no=int(note.get("created_round", round_no) or 0),
+                    ordinal=ordinal,
+                )
             meta = _segment_meta(state, idx)
             task_notes[idx] = pending
             agent_task = AgentTask(
@@ -868,26 +961,61 @@ def build_graph(
             result = scheduled.value
             runtime_notes.extend(result.notes)
             candidate = str(result.output.get("draft") or "")
+            revision_status = str(
+                result.output.get("revision_status") or "provider_error"
+            ).strip().lower()
             original_draft = (
                 draft_parts[idx] if idx < len(draft_parts) else ""
             )
             ratio = len(candidate.strip()) / max(1, len(original_draft.strip()))
             draft_mode = candidate.lstrip().startswith("[DRAFT]")
-            complete = (
+            output_complete = (
                 result.ok
                 and bool(candidate.strip())
                 and (draft_mode or ratio >= min_polished_segment_ratio)
             )
-            if complete:
+            if output_complete and revision_status in {"applied", "draft_fallback"}:
                 revised_parts[idx] = candidate
                 for note in task_notes.get(idx, []):
-                    note["resolution"] = "revision_applied"
-                    note["resolved_round"] = round_no
-                    note["status"] = "addressed"
-            else:
-                revised_parts[idx] = (
-                    draft_parts[idx] if idx < len(draft_parts) else ""
+                    note["revision_resolution"] = "applied"
+                    note["resolution"] = "revision_applied_pending_qa"
+                    note["revised_round"] = round_no
+                    note["status"] = "verification_pending"
+            elif output_complete and revision_status == "no_change":
+                revised_parts[idx] = original_draft
+                for note in task_notes.get(idx, []):
+                    note["revision_resolution"] = "no_change"
+                    note["resolution"] = "revision_no_change_pending_qa"
+                    note["revised_round"] = round_no
+                    note["status"] = "verification_pending"
+            elif result.ok and revision_status == "protocol_rejected":
+                revised_parts[idx] = original_draft
+                for note in task_notes.get(idx, []):
+                    note["revision_resolution"] = "protocol_rejected"
+                    note["resolution"] = "protocol_rejected"
+                    note["status"] = "open"
+                failures.append(
+                    _segment_failure(
+                        stage="revise",
+                        segment_id=segment_id,
+                        segment_index=idx,
+                        kind="semantic",
+                        reason=(
+                            "unit-ID 修订补丁未通过确定性校验，已保留修订前初稿："
+                            + str(result.output.get("revision_error") or "未知协议错误")
+                        ),
+                    )
                 )
+                emit_event(
+                    "revision.protocol_rejected",
+                    payload={
+                        "stage": "revise",
+                        "segment_index": idx,
+                        "safe_fallback": True,
+                    },
+                )
+            else:
+                revised_parts[idx] = original_draft
                 failures.append(
                     _segment_failure(
                         stage="revise",
@@ -915,7 +1043,9 @@ def build_graph(
                     "stage": "revise",
                     "segment_index": idx,
                     "segment_count": len(state["segments"]),
-                    "ok": complete,
+                    "ok": result.ok,
+                    "revision_status": revision_status,
+                    "output_complete": output_complete,
                     "from_checkpoint": scheduled.from_checkpoint,
                 },
             )
@@ -1118,6 +1248,24 @@ def build_graph(
             if segment_verdict not in ("pass", "rework"):
                 segment_verdict = "rework"
             detail = out.get("qa_detail") if isinstance(out.get("qa_detail"), dict) else {}
+            verification_notes = [
+                note
+                for note in _notes_for_segment(merged, segment_id, idx)
+                if isinstance(note, dict)
+                and str(note.get("resolution") or "").strip().lower()
+                in _REVISION_QA_PENDING_STATES
+            ]
+            for note in verification_notes:
+                if result.ok and segment_verdict == "pass":
+                    note["resolution"] = "resolved"
+                    note["qa_resolution"] = "verified"
+                    note["verified_round"] = round_no
+                    note["status"] = "closed"
+                elif result.ok:
+                    note["resolution"] = "qa_rejected"
+                    note["qa_resolution"] = "rejected"
+                    note["verified_round"] = round_no
+                    note["status"] = "open"
             previous_qa[idx] = {
                 "segment_id": segment_id,
                 "segment_index": idx,
@@ -1139,22 +1287,31 @@ def build_graph(
                         reason="QA 调用失败或输出无法解析",
                     )
                 )
-            for suggestion in detail.get("suggestions") or []:
-                merged.append(
-                    {
-                        "issue_type": "qa",
-                        "severity": "high" if segment_verdict == "rework" else "low",
-                        "span": segment_id,
-                        "suggestion": str(suggestion),
-                        "segment_id": segment_id,
-                        "segment_index": idx,
-                        "source": "qa",
-                        "created_round": round_no,
-                        "status": "open",
-                        "scope": "segment",
-                        "resolution": "pending",
-                    }
+            for ordinal, suggestion in enumerate(
+                detail.get("suggestions") or [], start=1
+            ):
+                note = {
+                    "issue_type": "qa",
+                    "severity": "high" if segment_verdict == "rework" else "low",
+                    "span": segment_id,
+                    "suggestion": str(suggestion),
+                    "segment_id": segment_id,
+                    "segment_index": idx,
+                    "source": "qa",
+                    "created_round": round_no,
+                    "status": "open",
+                    "scope": "segment",
+                    "resolution": "pending",
+                }
+                _ensure_review_note_id(
+                    note,
+                    segment_id=segment_id,
+                    segment_index=idx,
+                    source="qa",
+                    round_no=round_no,
+                    ordinal=ordinal,
                 )
+                merged.append(note)
             emit_event(
                 "stage.segment_completed",
                 payload={

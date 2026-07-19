@@ -23,6 +23,7 @@
 from __future__ import annotations
 
 import os
+import threading
 import time
 import uuid
 from dataclasses import dataclass, field
@@ -42,6 +43,64 @@ SUPPORTED_TIERS = (TIER_FAST, TIER_STRONG)
 # 重试默认值（指数退避 stub 用）
 _DEFAULT_MAX_RETRIES = 3
 _DEFAULT_BACKOFF_BASE = 1.0  # 秒，第 n 次重试等待 base * 2**n
+_CHAT_OVERHEAD_TOKEN_RESERVE = 64
+
+
+class LLMBudgetExceeded(RuntimeError):
+    """真实供应商请求在发出前超过共享硬预算。"""
+
+
+@dataclass
+class _RequestBudget:
+    """跨 tier/worker 共享的保守请求预算。"""
+
+    max_requests: int = 0
+    max_reserved_tokens: int = 0
+    _requests: int = 0
+    _reserved_tokens: int = 0
+    _lock: Any = field(default_factory=threading.Lock, repr=False)
+
+    def __post_init__(self) -> None:
+        if self.max_requests < 0:
+            raise ValueError("llm.budget.max_requests 不能小于 0")
+        if self.max_reserved_tokens < 0:
+            raise ValueError("llm.budget.max_reserved_tokens 不能小于 0")
+
+    def reserve(self, system: str, user: str, max_tokens: int) -> dict[str, int]:
+        # 供应商 tokenizer 未知时，以 UTF-8 字节数保守预留 prompt token；再为
+        # chat 消息封装留固定余量。completion 按请求 max_tokens 全额预留。
+        requested_tokens = (
+            len(system.encode("utf-8"))
+            + len(user.encode("utf-8"))
+            + _CHAT_OVERHEAD_TOKEN_RESERVE
+            + max(0, int(max_tokens))
+        )
+        with self._lock:
+            next_requests = self._requests + 1
+            next_tokens = self._reserved_tokens + requested_tokens
+            if self.max_requests > 0 and next_requests > self.max_requests:
+                raise LLMBudgetExceeded(
+                    f"供应商请求数将超过硬上限 {self.max_requests}"
+                )
+            if (
+                self.max_reserved_tokens > 0
+                and next_tokens > self.max_reserved_tokens
+            ):
+                raise LLMBudgetExceeded(
+                    "供应商请求的保守 token 预留将超过硬上限 "
+                    f"{self.max_reserved_tokens}"
+                )
+            self._requests = next_requests
+            self._reserved_tokens = next_tokens
+            return self.snapshot()
+
+    def snapshot(self) -> dict[str, int]:
+        return {
+            "requests": self._requests,
+            "reserved_tokens": self._reserved_tokens,
+            "max_requests": self.max_requests,
+            "max_reserved_tokens": self.max_reserved_tokens,
+        }
 
 
 @dataclass
@@ -119,12 +178,14 @@ class LLMClient:
         providers: dict[str, ProviderConfig],
         tier: str = TIER_FAST,
         default_tier: str = TIER_FAST,
+        request_budget: _RequestBudget | None = None,
     ) -> None:
         if tier not in SUPPORTED_TIERS:
             raise ValueError(f"未知模型档位: {tier!r}，仅支持 {SUPPORTED_TIERS}")
         self._providers = providers
         self.tier = tier
         self.default_tier = default_tier
+        self._request_budget = request_budget or _RequestBudget()
         # token 用量累计
         self._prompt_tokens = 0
         self._completion_tokens = 0
@@ -174,11 +235,28 @@ class LLMClient:
         default_tier = llm_cfg.get("default_tier", TIER_FAST)
         if default_tier not in SUPPORTED_TIERS:
             default_tier = TIER_FAST
-        return cls(providers=providers, tier=tier or default_tier, default_tier=default_tier)
+        budget_raw = dict(llm_cfg.get("budget") or {})
+        request_budget = _RequestBudget(
+            max_requests=int(budget_raw.get("max_requests", 0) or 0),
+            max_reserved_tokens=int(
+                budget_raw.get("max_reserved_tokens", 0) or 0
+            ),
+        )
+        return cls(
+            providers=providers,
+            tier=tier or default_tier,
+            default_tier=default_tier,
+            request_budget=request_budget,
+        )
 
     def with_tier(self, tier: str) -> "LLMClient":
-        """返回同一组配置下另一档位的新客户端（token 统计独立）。"""
-        return LLMClient(providers=self._providers, tier=tier, default_tier=self.default_tier)
+        """返回另一档位客户端；调用状态独立，但真实请求硬预算全局共享。"""
+        return LLMClient(
+            providers=self._providers,
+            tier=tier,
+            default_tier=self.default_tier,
+            request_budget=self._request_budget,
+        )
 
     # ------------------------------------------------------------------
     # 属性
@@ -206,6 +284,10 @@ class LLMClient:
             "tier": self.tier,
             "default_tier": self.default_tier,
             "providers": providers,
+            "request_budget": {
+                "max_requests": self._request_budget.max_requests,
+                "max_reserved_tokens": self._request_budget.max_reserved_tokens,
+            },
         }
 
     @property
@@ -231,6 +313,12 @@ class LLMClient:
             "completion_tokens": self._completion_tokens,
             "total_tokens": self.total_tokens,
         }
+
+    @property
+    def request_budget_usage(self) -> dict[str, int]:
+        """跨 tier/worker 共享的供应商请求与保守 token 预留。"""
+        with self._request_budget._lock:
+            return self._request_budget.snapshot()
 
     @property
     def last_notes(self) -> list[str]:
@@ -406,6 +494,9 @@ class LLMClient:
                     request["extra_body"] = {"thinking": {"type": thinking}}
                 if bool(cfg.extra.get("stream_include_usage", False)):
                     request["stream_options"] = {"include_usage": True}
+                # 放在 SDK 请求前，计入供应商级重试和 complete() 的残稿重试；
+                # 无 key / 无 SDK 的本地 DRAFT 降级不会消耗真实请求预算。
+                self._request_budget.reserve(system, user, max_tokens)
                 stream = client.chat.completions.create(**request)
                 for chunk in stream:
                     usage = getattr(chunk, "usage", None)
@@ -482,6 +573,17 @@ class LLMClient:
                     },
                 )
                 return
+            except LLMBudgetExceeded as exc:
+                self._last_notes.append(f"LLM 硬预算已耗尽：{exc}")
+                emit_event(
+                    "budget.exhausted",
+                    tier=self.tier,
+                    payload={
+                        "scope": "llm_provider_request",
+                        **self.request_budget_usage,
+                    },
+                )
+                raise
             except Exception as exc:  # noqa: BLE001 - 统一降级，不向上抛
                 if emitted_this_attempt:
                     self._last_call_incomplete = True
