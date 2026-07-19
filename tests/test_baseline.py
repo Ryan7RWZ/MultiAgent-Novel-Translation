@@ -124,9 +124,10 @@ class TestBaselineTranslator(unittest.TestCase):
         self.llm = FakeLLMClient()
         self.translator = BaselineTranslator()
         self.chapter = Path(self._tmp.name) / "chapter_001.txt"
-        self.chapter.write_text(
-            "雪乃看着窗外的雪。\n\nYuki 没有说话，只是微微一笑。\n",
-            encoding="utf-8",
+        self.chapter.write_bytes(
+            "雪乃看着窗外的雪。\n\nYuki 没有说话，只是微微一笑。\n".encode(
+                "gb18030"
+            )
         )
 
     def test_translate_chapter_returns_expected_structure(self) -> None:
@@ -139,6 +140,7 @@ class TestBaselineTranslator(unittest.TestCase):
             self.assertIn(key, result)
         self.assertEqual(result["work_id"], self.WORK_ID)
         self.assertEqual(result["chapter_id"], "chapter_001")
+        self.assertEqual(result["input_encoding"], "gb18030")
         # 空行分隔的两个段落；每段恰好一次 LLM 调用（单 Agent 直译的特征）
         self.assertEqual(len(result["segments"]), 2)
         self.assertEqual(len(result["translations"]), len(result["segments"]))

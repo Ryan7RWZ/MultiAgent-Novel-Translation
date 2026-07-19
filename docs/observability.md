@@ -3,7 +3,8 @@
 ## 1. 使用方式
 
 Windows 一键启动：双击根目录的 `start_mant.bat` 即可打开浏览器翻译工作台。
-在页面中可以直接粘贴中文，或把 UTF-8 TXT 拖进输入框，然后点击“开始翻译”。
+在页面中可以直接粘贴中文，或把常见编码的 TXT 拖进输入框；页面会显示
+检测到的原编码并转为 UTF-8，然后再点击“开始翻译”。
 页面同时展示六个 Agent、LLM 流式输出、QA 路由和最终译文。
 
 仍可把章节文件拖到 BAT 上，或通过命令行指定作品和章节：
@@ -31,7 +32,9 @@ mant translate-chapter --config config/settings.yaml \
 segment、LLM 原始增量、节点时间线、QA 分数和返工路由。两个进程通过
 `data/traces/*.jsonl` 解耦，不要求翻译进程内嵌 Web 服务。
 
-浏览器通过 `POST /api/translate` 提交文本，后端把输入写入已忽略的
+浏览器选择 TXT 时先以原始字节调用 `POST /api/decode-text`，后端
+识别编码、严格解码并返回 UTF-8/Unicode 预览；浏览器不自行用 UTF-8 误读
+GBK/Big5 文件。点击翻译后再通过 `POST /api/translate` 提交文本，后端把输入写入已忽略的
 `data/inputs/`，再启动正式 `mant translate-chapter` 子进程。任务状态由
 `GET /api/jobs/<job_id>` 查询，完成后页面显示 `data/exports/web/` 中的成品。
 输入、路径片段、字符上限和 `max_rework` 均在服务端再次校验；同一时间只接受
@@ -65,7 +68,8 @@ segment、LLM 原始增量、节点时间线、QA 分数和返工路由。两个
 
 **使用流程**
 
-1. 粘贴中文原文，或把 UTF-8 TXT 拖进输入区：载入后字符计数实时更新，
+1. 粘贴中文原文，或把 TXT 拖进输入区：服务端识别原编码并转为
+   UTF-8，载入后字符计数实时更新，
    章节 ID 自动填充为文件名（可再修改）；作品 ID 默认 `demo_work`，
    最大返工默认 2 次；
 2. 点击“开始翻译”，任务期间按钮禁用（同一时间只执行一个任务）；
@@ -95,7 +99,7 @@ LangGraph / BaseAgent / LLMClient
 
 | 范围 | 事件 |
 | --- | --- |
-| 运行 | `run.started` / `run.completed` / `run.failed` |
+| 运行 | `run.started` / `input.decoded` / `run.completed` / `run.failed` |
 | LangGraph | `node.started` / `node.completed` / `node.failed` / `workflow.route` |
 | Agent | `agent.started` / `agent.completed` / `agent.failed` |
 | LLM | `llm.started` / `llm.token` / `llm.retry` / `llm.completed` / `llm.failed` / `llm.fallback` |

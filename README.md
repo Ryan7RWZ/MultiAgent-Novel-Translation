@@ -13,6 +13,7 @@
 - **记忆与数据层**：术语库（SQLite，可切 Postgres）、小说圣经、翻译记忆库 TM、
   FAISS 向量检索 RAG，保证跨章节一致性；
 - **语料资产先行**：M1 离线管道把平行语料沉淀为术语库与 TM，越译越准；
+- **输入统一**：用户 TXT 先按原始字节识别编码，再以 UTF-8 进入管道，不覆盖原文件；
 - **实验对照**：M2 单 Agent 基线与多智能体方案同口径对比，用数据验证收益。
 
 ### 四大难点
@@ -85,6 +86,7 @@ MultiAgent-Novel-Translation/
 │       ├── memory/             # MemoryHub 门面：术语库 / 小说圣经 / TM / FAISS
 │       ├── workflow/           # LangGraph 状态机与 TranslationState
 │       ├── observability/      # 事件总线、终端/追踪接收器与 SSE 监控页
+│       ├── textio.py           # TXT 编码识别与 UTF-8 工作副本转换
 │       └── pipeline/           # M1 离线语料管道
 ├── tests/
 │   ├── __init__.py             # 将 src 加入 sys.path（python -m unittest 可用）
@@ -133,6 +135,10 @@ set DEEPSEEK_API_KEY=你的key
 
 - `settings.yaml` 已加入 .gitignore；**API key 只走环境变量**（由 `api_key_env` 指定变量名）；
 - 未配置 API key 时 `LLMClient` 返回 `[DRAFT]` 前缀的占位响应，流程仍可跑通。
+- CLI、BAT 拖放、Baseline、M1 本地语料和浏览器导入会先识别
+  TXT 原编码（包括 BOM、GBK/GB18030、Big5、UTF-16/32 及常见
+  日韩/西文编码），严格解码后统一以 UTF-8 进入翻译器。原文件
+  不会被改写；无法可靠判定编码或明显为二进制时会明确报错。
 - `segmentation.*` 控制无 LLM 的机械初始切片：默认正文目标/上限为
   900/1200 估算 token，并为每片注入受限的相邻上下文。算法、不变量与元数据
   见 [确定性初始切片设计](docs/segmentation.md)。
@@ -173,7 +179,7 @@ mant monitor
 ### 4.4 实时观察各 Agent
 
 Windows 可以直接双击仓库根目录的 `start_mant.bat`，它会启动浏览器翻译
-工作台。打开后可以直接粘贴原文，或把 UTF-8 `.txt` 文件拖进页面，填写作品/
+工作台。打开后可以直接粘贴原文，或把常见编码的 `.txt` 文件拖进页面，填写作品/
 章节 ID 后点击“开始翻译”；Agent 状态、LLM 增量和最终译文都在同一页展示。
 界面采用浅色编辑制作台布局：顶部集中显示实时连接、运行状态与历史运行，首屏
 左侧提交原文，右侧同时展示阶段进度、片段/调用/Token/耗时指标和六个 Agent 的

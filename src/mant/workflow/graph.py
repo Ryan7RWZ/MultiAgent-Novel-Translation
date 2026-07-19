@@ -47,6 +47,7 @@ from mant.agents.terminologist import TerminologistAgent
 from mant.agents.translator import TranslatorAgent
 from mant.execution import ExecutionConfig, RunManifestStore, StageExecutor, StageTask
 from mant.observability import emit_event, event_scope, run_context
+from mant.textio import read_text_file
 from mant.workflow.state import DEFAULT_MAX_REWORK, TranslationState, init_state
 
 if TYPE_CHECKING:  # 仅类型标注，避免运行时循环依赖
@@ -1383,7 +1384,17 @@ def run_chapter(
             payload={"chapter_path": str(path), "max_rework": max_rework},
         )
         try:
-            text = path.read_text(encoding="utf-8")
+            decoded_input = read_text_file(path)
+            text = decoded_input.text
+            emit_event(
+                "input.decoded",
+                payload={
+                    "encoding": decoded_input.encoding,
+                    "input_bytes": decoded_input.byte_length,
+                    "had_bom": decoded_input.had_bom,
+                    "converted_to": "utf-8",
+                },
+            )
             # 在线翻译只做安全规范化；M1 的去重/广告清洗可能误删小说正文。
             orchestrator = OrchestratorAgent(
                 llm, memory, segmentation_config=segmentation_config
@@ -1462,6 +1473,7 @@ def run_chapter(
                     segment_meta=segmentation.metadata,
                     segmentation_stats=stats,
                     run_id=active_run_id,
+                    source_encoding=decoded_input.encoding,
                 )
             else:
                 if str(resume_state.get("work_id") or "") != work_id:

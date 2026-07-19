@@ -18,19 +18,17 @@ class TestPipelineQuality(unittest.TestCase):
             work = root / "raw" / "demo"
             (work / "src").mkdir(parents=True)
             (work / "tgt").mkdir(parents=True)
-            (work / "src" / "0001.txt").write_text(
+            (work / "src" / "0001.txt").write_bytes(
                 "第一章 初见\n\n"
                 "苍澜大陆东境，坐落着青玄宗。"
                 "沈孤鸿站在落霞谷中。"
-                "他取出了玄火镜。\n",
-                encoding="utf-8",
+                "他取出了玄火镜。\n".encode("gb18030")
             )
-            (work / "tgt" / "0001.txt").write_text(
+            (work / "tgt" / "0001.txt").write_bytes(
                 "Chapter 1 First Encounter\n\n"
                 "In the eastern reaches of the Canglan Continent stood the Azure Profound Sect. "
                 "Shen Guhong waited in Sunset Valley. "
-                "He took out the Profound Fire Mirror.\n",
-                encoding="utf-8",
+                "He took out the Profound Fire Mirror.\n".encode("utf-16")
             )
             (work / "terminology.md").write_text(
                 "| 源词 | 译法 | 类别 |\n"

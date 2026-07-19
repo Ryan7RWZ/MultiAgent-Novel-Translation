@@ -372,7 +372,7 @@ class TestObservability(unittest.TestCase):
         observer = RunObserver([sink])
         with tempfile.TemporaryDirectory() as tmp:
             chapter = Path(tmp) / "chapter.txt"
-            chapter.write_text("他拔出了剑。\n他拔出了剑。", encoding="utf-8")
+            chapter.write_bytes("他拔出了剑。\n他拔出了剑。".encode("gb18030"))
             final = run_chapter(
                 "demo",
                 chapter,
@@ -406,6 +406,12 @@ class TestObservability(unittest.TestCase):
             any(event.event_type == "segmentation.completed" for event in sink.events)
         )
         self.assertEqual(final["source_text"], "他拔出了剑。\n他拔出了剑。")
+        self.assertEqual(final["source_encoding"], "gb18030")
+        decoded_events = [
+            event for event in sink.events if event.event_type == "input.decoded"
+        ]
+        self.assertEqual(decoded_events[0].payload["encoding"], "gb18030")
+        self.assertEqual(decoded_events[0].payload["converted_to"], "utf-8")
         self.assertTrue(final["segmentation_stats"]["reconstruction_ok"])
         self.assertEqual(len(final["draft_segments"]), len(final["segments"]))
         self.assertEqual(len(final["polished_segments"]), len(final["segments"]))
@@ -477,6 +483,15 @@ class TestObservability(unittest.TestCase):
                 manager.submit(text="   ")
             with self.assertRaisesRegex(ValueError, "输入过长"):
                 manager.submit(text="123456")
+            decoded = manager.decode_upload(
+                raw="繁體中文".encode("big5"),
+                filename="chapter.txt",
+            )
+            self.assertEqual(decoded["text"], "繁體中文")
+            self.assertEqual(decoded["encoding"], "big5")
+            self.assertEqual(decoded["converted_to"], "utf-8")
+            with self.assertRaisesRegex(ValueError, r"\.txt"):
+                manager.decode_upload(raw=b"hello", filename="chapter.md")
         self.assertEqual(_safe_id("../../", fallback="safe"), "safe")
         self.assertIn('id="sourceText"', DASHBOARD_HTML)
         self.assertIn('id="fileInput"', DASHBOARD_HTML)
@@ -490,6 +505,9 @@ class TestObservability(unittest.TestCase):
         self.assertIn("requestAnimationFrame", DASHBOARD_HTML)
         self.assertIn("event.event_type!=='llm.token'", DASHBOARD_HTML)
         self.assertIn("/api/translate", DASHBOARD_HTML)
+        self.assertIn("/api/decode-text", DASHBOARD_HTML)
+        self.assertIn("file.arrayBuffer()", DASHBOARD_HTML)
+        self.assertNotIn("file.text()", DASHBOARD_HTML)
 
     def test_closing_dashboard_terminates_active_translation(self) -> None:
         created = threading.Event()

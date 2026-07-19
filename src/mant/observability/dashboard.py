@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import base64
+import binascii
 import json
 import queue
 import re
@@ -19,6 +21,7 @@ from typing import Any
 from urllib.parse import unquote, urlparse
 
 from mant.observability.runtime import new_run_id
+from mant.textio import decode_text_bytes
 
 
 DASHBOARD_HTML_LEGACY = r"""<!doctype html>
@@ -154,7 +157,8 @@ function render(id){
 }
 function setJobMessage(text,kind=''){jobMessage.textContent=text;jobMessage.className='job-message '+kind}
 function updateCount(){charCount.textContent=`${sourceText.value.length} 字符`}
-async function loadFile(file){if(!file)return;if(!file.name.toLowerCase().endsWith('.txt')&&file.type!=='text/plain'){setJobMessage('请选择 TXT 文本文件。','error');return}try{sourceText.value=await file.text();if(!chapterInput.value)chapterInput.value=file.name.replace(/\.txt$/i,'');updateCount();setJobMessage(`已载入 ${file.name}，共 ${sourceText.value.length} 字符。`,'success')}catch(e){setJobMessage(`读取文件失败：${e.message}`,'error')}}
+function bufferToBase64(buffer){const bytes=new Uint8Array(buffer),chunks=[],size=32768;for(let offset=0;offset<bytes.length;offset+=size)chunks.push(String.fromCharCode(...bytes.subarray(offset,offset+size)));return btoa(chunks.join(''))}
+async function loadFile(file){if(!file)return;if(!file.name.toLowerCase().endsWith('.txt')){setJobMessage('请选择 TXT 文本文件。','error');return}setJobMessage(`正在识别 ${file.name} 的文本编码……`);try{const response=await fetch('/api/decode-text',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({filename:file.name,data_base64:bufferToBase64(await file.arrayBuffer())})}),decoded=await response.json();if(!response.ok)throw new Error(decoded.error||'编码识别失败');sourceText.value=decoded.text||'';if(!chapterInput.value)chapterInput.value=file.name.replace(/\.txt$/i,'');updateCount();setJobMessage(`已将 ${file.name} 从 ${decoded.encoding||'未知编码'} 转为 UTF-8，共 ${sourceText.value.length} 字符。`,'success')}catch(e){setJobMessage(`读取文件失败：${e.message}`,'error')}}
 async function pollJob(id){while(true){await new Promise(resolve=>setTimeout(resolve,1000));try{const response=await fetch(`/api/jobs/${encodeURIComponent(id)}`,{cache:'no-store'}),job=await response.json();if(!response.ok)throw new Error(job.error||'任务查询失败');if(job.status==='completed'){resultText.textContent=job.result_text||'（译文为空）';const m=job.metadata||{},coverage=m.qa_summary?.coverage;resultMeta.textContent=`输出：${job.output_path} · QA=${m.qa_verdict??'—'} · score=${m.qa_score??'—'}${coverage==null?'':` · 覆盖 ${(Number(coverage)*100).toFixed(1)}%`}`;setJobMessage('翻译完成。','success');translateButton.disabled=false;return}if(job.status==='failed'){setJobMessage(`翻译失败：${job.error||'未知错误'}`,'error');translateButton.disabled=false;return}setJobMessage(`任务 ${id} 正在运行，请保持页面打开……`)}catch(e){setJobMessage(`任务状态查询失败，稍后自动重试：${e.message}`,'error')}}}
 async function startTranslation(){const text=sourceText.value;if(!text.trim()){setJobMessage('请粘贴原文或拖入一个非空 TXT 文件。','error');sourceText.focus();return}translateButton.disabled=true;resultText.textContent='翻译进行中……';resultMeta.textContent='';setJobMessage('正在提交任务……');try{const response=await fetch('/api/translate',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({text,work_id:workInput.value,chapter_id:chapterInput.value,max_rework:Number(reworkInput.value)})}),job=await response.json();if(!response.ok)throw new Error(job.error||'提交失败');selected=job.run_id;ensureOption(job.run_id);runSelect.value=job.run_id;setJobMessage(`任务 ${job.job_id} 已提交，正在启动 Agent……`,'success');pollJob(job.job_id)}catch(e){setJobMessage(`提交失败：${e.message}`,'error');translateButton.disabled=false}}
 sourceText.addEventListener('input',updateCount);fileInput.addEventListener('change',()=>loadFile(fileInput.files[0]));clearButton.addEventListener('click',()=>{sourceText.value='';fileInput.value='';resultText.textContent='翻译完成后将在这里显示最终译文。';resultMeta.textContent='';updateCount();sourceText.focus()});translateButton.addEventListener('click',startTranslation);['dragenter','dragover'].forEach(name=>dropZone.addEventListener(name,e=>{e.preventDefault();dropZone.classList.add('dragging')}));['dragleave','drop'].forEach(name=>dropZone.addEventListener(name,e=>{e.preventDefault();dropZone.classList.remove('dragging')}));dropZone.addEventListener('drop',e=>loadFile(e.dataTransfer.files[0]));
@@ -358,7 +362,9 @@ class TranslationJobManager:
             traces.resolve() if traces.is_absolute() else (self.project_root / traces).resolve()
         )
         self.max_input_chars = max(1, int(max_input_chars))
-        self.max_request_bytes = self.max_input_chars * 4 + 16_384
+        # UTF-32 原始字节经 base64 后约为字符数的 5.34 倍，预留 JSON 开销。
+        self.max_input_bytes = self.max_input_chars * 4 + 4
+        self.max_request_bytes = self.max_input_chars * 6 + 65_536
         self._jobs: dict[str, TranslationJob] = {}
         self._active_job_id = ""
         self._process: subprocess.Popen | None = None
@@ -434,6 +440,30 @@ class TranslationJobManager:
             thread = threading.Thread(target=self._run, args=(job,), daemon=True)
             thread.start()
             return job.public(self.project_root)
+
+    def decode_upload(self, *, raw: bytes, filename: Any) -> dict[str, Any]:
+        """解码浏览器上传的 TXT 原始字节，返回供预览/提交的 Unicode 文本。"""
+        name = str(filename or "uploaded.txt").strip() or "uploaded.txt"
+        if not name.lower().endswith(".txt"):
+            raise ValueError("请选择扩展名为 .txt 的文本文件。")
+        if len(raw) > self.max_input_bytes:
+            raise ValueError(
+                f"TXT 文件过大：{len(raw)} 字节，当前字节上限为 "
+                f"{self.max_input_bytes}。"
+            )
+        decoded = decode_text_bytes(raw, source_name=Path(name).name)
+        if len(decoded.text) > self.max_input_chars:
+            raise ValueError(
+                f"输入过长：{len(decoded.text)} 字符，当前上限为 "
+                f"{self.max_input_chars}。"
+            )
+        return {
+            "text": decoded.text,
+            "encoding": decoded.encoding,
+            "byte_length": decoded.byte_length,
+            "had_bom": decoded.had_bom,
+            "converted_to": "utf-8",
+        }
 
     def get(self, job_id: str) -> dict[str, Any] | None:
         with self._lock:
@@ -572,7 +602,7 @@ def _handler_for(broker: TraceBroker, jobs: TranslationJobManager):
 
         def do_POST(self) -> None:  # noqa: N802 - BaseHTTPRequestHandler API
             path = urlparse(self.path).path
-            if path != "/api/translate":
+            if path not in {"/api/translate", "/api/decode-text"}:
                 self.send_error(HTTPStatus.NOT_FOUND)
                 return
             content_type = self.headers.get("Content-Type", "")
@@ -599,6 +629,20 @@ def _handler_for(broker: TraceBroker, jobs: TranslationJobManager):
                 payload = json.loads(self.rfile.read(length).decode("utf-8"))
                 if not isinstance(payload, dict):
                     raise ValueError("请求 JSON 必须是对象。")
+                if path == "/api/decode-text":
+                    encoded = payload.get("data_base64")
+                    if not isinstance(encoded, str) or not encoded:
+                        raise ValueError("TXT 上传内容为空。")
+                    try:
+                        raw = base64.b64decode(encoded, validate=True)
+                    except (binascii.Error, ValueError) as exc:
+                        raise ValueError("TXT 上传内容不是合法的 base64。") from exc
+                    decoded = jobs.decode_upload(
+                        raw=raw,
+                        filename=payload.get("filename"),
+                    )
+                    self._send_json(HTTPStatus.OK, decoded)
+                    return
                 job = jobs.submit(
                     text=payload.get("text"),
                     work_id=payload.get("work_id", "demo_work"),

@@ -19,6 +19,7 @@ dependencies = [
     "pyyaml>=6.0",          # 读取 config/settings.yaml
     "numpy>=1.26",          # 向量与数值计算
     "python-dotenv>=1.0",   # 从 .env 加载 API key 等环境变量
+    "chardet>=5.2",         # 识别用户导入 TXT 的常见历史编码
 ]
 
 [project.optional-dependencies]

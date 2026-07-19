@@ -2,9 +2,9 @@
 
 > 快照日期：2026-07-19（Asia/Shanghai）
 >
-> 分支：`agent/close-quality-loop`，基于 `origin/main`（`578be8c`）
+> 分支：`agent/normalize-txt-encoding`，基于 `origin/main` 的 `d581597`
 >
-> 状态：核心 M1、章节多 Agent 链路、流式事件、实时监控、浏览器工作台、并发执行和 checkpoint/manifest 已合入 `main`；本分支修复真实 DeepSeek 20 片验收暴露的 Editor 输出预算、漏译修订职责和 QA 临界误放行问题，并已完成一次新的真实 20 片复验。Editor 截断已消失，revision 仍暴露局部输出问题。
+> 状态：核心 M1、章节多 Agent 链路、流式事件、实时监控、浏览器工作台、并发执行、checkpoint/manifest 与质量闭环已合入 `main`。当前分支已完成所有用户 TXT 入口的编码识别与 UTF-8 归一、配套文档、离线回归和一次完整 DeepSeek 实译，等待 PR 审查。
 
 ## 1. 项目目标
 
@@ -84,9 +84,10 @@ MultiAgent-Novel-Translation/
 │  ├─ observability/            # 事件、sink、运行上下文、SSE 服务与 dashboard.html
 │  ├─ pipeline/                 # 采集、清洗、对齐、术语提取和统一 runner
 │  ├─ segmentation.py           # 结构优先、token 预算约束的确定性初始切片
+│  ├─ textio.py                 # 用户 TXT 编码识别与 UTF-8 工作副本转换
 │  ├─ workflow/                 # TranslationState 与 LangGraph 章节工作流
 │  └─ cli.py                    # m1-pipeline/baseline/translate-chapter/resume-run/monitor
-└─ tests/                       # 54 项 pytest / 40 项 unittest，覆盖切片、记忆、流程、返工、事件和质量规则
+└─ tests/                       # 71 项 pytest / 44 项 unittest，含多编码 TXT、切片、记忆、流程、返工、事件和质量规则
 ```
 
 `data/` 中的运行内容默认被忽略；目录中现有 M1 演示产物是本地验证用事实，不应误认为待提交的数据集。
@@ -95,11 +96,11 @@ MultiAgent-Novel-Translation/
 
 最近提交（由新到旧）：
 
-1. `51f340e`（2026-07-18）— 合并 PR #3：安全的逐片长文本工作流。
-2. `0baa420`（2026-07-18）— 完成机械切片、四阶段逐片处理与残稿拒收。
-3. `3de85e5`（2026-07-18）— 合并 PR #2：浏览器工作台浅色简约界面。
-4. `52c2ef6`（2026-07-18）— 重构浏览器工作台前端。
-5. `1f8d20d`（2026-07-18）— 合并 PR #1：可观测流式翻译工作台。
+1. `d581597`（2026-07-19）— 合并 PR #5：质量闭环加固与浏览器工作台重建。
+2. `adb8d56`（2026-07-19）— 修复 Editor/revision/QA 质量闭环并记录真实 20 片复验。
+3. `578be8c`（2026-07-18）— 合并 PR #4：并发执行、checkpoint 与 manifest 加固。
+4. `4a3cf9c`（2026-07-18）— 完成长文本有界并发与定点恢复。
+5. `51f340e`（2026-07-18）— 合并 PR #3：安全的逐片长文本工作流。
 
 重要提示：`agent/observable-streaming-workbench` 的功能已经通过 PR #1/#2 合入 `main`。此前关于“尚未进入 main”或“新增文件尚未跟踪”的描述均为历史状态。
 
@@ -150,9 +151,12 @@ MultiAgent-Novel-Translation/
 
 ### 5.6 浏览器输入与一键启动
 
-- 浏览器页面支持直接粘贴文本或拖入 UTF-8 `.txt` 文件。
+- 浏览器页面支持直接粘贴文本或拖入常见编码的 `.txt` 文件；
+  上传时保留原始字节，服务端识别编码并返回 UTF-8 预览。
 - 页面支持作品 ID、章节 ID、最大返工次数，显示六个 Agent 状态、流式文本和最终译文。
-- 服务端提供 `POST /api/translate` 和 `GET /api/jobs/{id}`，校验 ID、文件类型和输入长度；任务通过正式 CLI 子进程执行。
+- 服务端提供 `POST /api/decode-text`、`POST /api/translate` 和
+  `GET /api/jobs/{id}`，校验 ID、文件类型、原始字节数和输入长度；任务通过正式
+  CLI 子进程执行。
 - 当前服务限制同一时间一个任务，关闭监控服务时会回收子进程。
 - `start_mant.bat` 支持双击打开浏览器、拖放 TXT 直接翻译以及 `--check`；优先项目虚拟环境，并在启动时从 Windows 用户环境刷新 `DEEPSEEK_API_KEY`（不打印值）。
 
@@ -436,7 +440,7 @@ dashboard 内嵌 JavaScript new Function   → 语法通过
 下一项质量加固应针对 revision“只返回修改片段而非完整译文”的真实行为，采用更
 强的完整输出契约或可确定性应用的结构化 patch，再用同一 run 的 checkpoint 做低成本复验。
 
-### 5.15 浏览器翻译制作台重建（本分支，2026-07-19）
+### 5.15 浏览器翻译制作台重建（已合入 main，2026-07-19）
 
 - 保留 Python 标准库 HTTP、`POST /api/translate`、`GET /api/jobs/<id>`、
   `GET /api/health` 和 SSE `/events` 契约，不引入 Node 构建链或第三方前端依赖。
@@ -451,13 +455,61 @@ dashboard 内嵌 JavaScript new Function   → 语法通过
   无重复，JavaScript 可由 Node 解析，观测测试 12/12 通过，`start_mant.bat --check`
   通过。当前 Codex 会话没有可用浏览器实例，尚未完成截图、拖放和响应式视觉验收。
 
+### 5.16 用户 TXT 编码统一（当前分支，2026-07-19）
+
+- 新增 `mant.textio`：按 BOM、严格 UTF-8、chardet 和确定性候选识别用户
+  TXT，覆盖 GBK/GB18030、Big5、UTF-16/32、Shift-JIS/CP932、EUC-JP、
+  EUC-KR/CP949 及常见 Windows 西文编码。解码全程使用 strict，不以
+  replacement character 静默产生乱码；明显二进制输入会被拒绝。
+- 原文件保持不变；`convert_text_file_to_utf8` 只写新的 UTF-8 工作副本。
+  章节工作流在 `TranslationState.source_encoding`、CLI metadata 和
+  `input.decoded` 事件中保留原编码。
+- 已接入 `translate-chapter`/BAT 拖放、Baseline、M1 `LocalTxtCollector`
+  和浏览器工作台。浏览器不再调用 `File.text()`，而是把 `arrayBuffer()`
+  的原始字节发给 `POST /api/decode-text`，避免 GBK/Big5 在到达服务端前就
+  被浏览器按 UTF-8 损坏。
+- 新增编码参数化回归和工作副本/二进制拒绝测试，并用 GB18030
+  运行 Baseline/正式 workflow、用 GB18030 + UTF-16 运行 M1、用 Big5 验证
+  浏览器解码边界。`.venv/bin/pytest -q` 为 71 passed，`unittest`
+  为 44 tests，`compileall` 和 `git diff --check` 通过；未调用真实 LLM。
+
+### 5.17 DeepSeek V4 完整 TXT 实译（当前分支，2026-07-19）
+
+用户明确授权将 `data/raw/斗罗大陆外传神界传说._副本.txt` 全文发送给
+DeepSeek 并承担费用。本次配置 fast=`deepseek-v4-flash`、
+strong=`deepseek-v4-pro`、全局并发 4、checkpoint/manifest 开启、
+`max_rework=0`：
+
+- 原文自动识别为 GB18030，414,427 bytes / 219,688 字符；机械规范化后
+  215,938 字符、244,527 估算 token，生成 253 片。最大 1,174 token，
+  0 次硬切，原文回拼通过；源文件保持不变。
+- 首次运行在本地 1 小时命令上限处被终止；同 run ID 恢复命中
+  978 个成功 checkpoint，只重试 2 个初译失败片、受其影响的 Editor/
+  revision 和未完成下游。最终 checkpoint 为 Terminology 253、Translate
+  253、Editor 253、Revision 252（1 片无需修订）、Polish 253、QA 253，
+  全部成功；有效执行并发峰值 4，0 个 checkpoint 错误。
+- 两段 trace 共记录 1,520 次成功 LLM 响应，成功响应 usage 合计
+  6,810,905 prompt + 682,232 completion = 7,493,137 token。共有 25 条
+  可恢复的 `llm.failed` 技术事件（主要为长流读超时/协议中断），
+  残稿均被丢弃；首次命令被终止时另有 4 条在途请求。准确费用以
+  DeepSeek 账单为准。主运行 3,599.6 s，恢复 941.5 s。
+- UTF-8 译文为 711,256 字符 / 6,903 行；`[DRAFT]`、`[SEGMENT_ERROR]`、
+  CJK 残留和代码围栏均为 0。润色/初稿长度比 0.9951，最终
+  `segment_failures=[]`。
+- QA 技术覆盖率与 token 覆盖率均为 1.0；加权分 8.37，128 片
+  pass、125 片 rework。因本次限定 `max_rework=0`，结果正确标记
+  `needs_human_review=true`，未继续产生第二轮费用。产物位于
+  `data/exports/deepseek-v4-full/`，trace 分别位于 `data/traces/` 与
+  `data/traces/recovery-v1/`，manifest 位于 `data/runtime/runs/`。
+
 ## 6. 正在开发或尚未稳定的部分
 
-- 流式 LLM、机械切片、逐片下游、并发执行层、checkpoint、定点返工和浏览器工作台
-  已进入 `main`；本分支包含质量闭环修复、离线回归及一次真实 20 片复验记录。
-- 253 片旧代码和 20 片新代码的真实 DeepSeek 4 并发均已完成；并发调度、确定性
-  归并、checkpoint、v3 指纹和 manifest 已由真实 run 产出。Editor 20/20 完成且无
-  截断；revision 19 次中 18 次通过，一次局部输出被完整性保护拒绝。
+- 流式 LLM、机械切片、逐片下游、并发执行层、checkpoint、定点返工、质量闭环
+  和浏览器工作台已进入 `main`；当前分支增加 TXT 编码识别与 UTF-8 归一。
+- 253 片完整 GB18030 TXT 已使用 DeepSeek V4 Flash/Pro 跑完 1,520 次成功
+  LLM 响应；并发调度、编码归一、确定性归并、跨进程 checkpoint 恢复、
+  v3 指纹和 manifest 均由真实 run 验证。最终六阶段无失败且 QA 覆盖 100%，
+  但 125/253 片被 QA 判 rework，尚未进行第二轮质量返工。
   `resume-run --stage qa --failed-only` 仍尚未在真实失败 run 上执行。
 - macOS 命令行与浏览器 API 已验证；Windows `start_mant.bat` 的真实供应商启动、拖放与浏览器视觉交互仍需在 Windows 环境人工验收。
 - 浏览器工作台通过 API 和 JavaScript 语法测试，但当前会话没有可用的浏览器自动化运行时，因此尚缺一次真实点击、拖放、滚动和视觉布局检查。
