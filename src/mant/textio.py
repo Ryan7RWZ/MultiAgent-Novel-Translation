@@ -12,6 +12,8 @@ from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any
 
+from chardet import detect as _detect_encoding
+
 __all__ = [
     "DecodedText",
     "TextDecodingError",
@@ -47,20 +49,18 @@ _BOM_ENCODINGS: tuple[tuple[bytes, str, str], ...] = (
     (codecs.BOM_UTF16_BE, "utf-16", "utf-16-be"),
 )
 
-_COMMON_ENCODINGS: tuple[str, ...] = (
-    # 中文 TXT 的主要历史编码。GB18030 是 GBK/GB2312 的超集。
-    "gb18030",
-    "big5",
-    "cp950",
-    # 常见东亚与西文文本，供自动检测不可用或未给出候选时兜底。
-    "shift_jis",
-    "cp932",
-    "euc_jp",
-    "euc_kr",
-    "cp949",
-    "windows-1252",
-    "windows-1251",
-)
+# 只在检测器已经识别出编码家族后尝试严格兼容扩展。不能把所有旧编码按固定
+# 顺序逐个试解码：多数双字节编码会把其他语言字节“成功”解成无控制字符的乱码。
+_ENCODING_COMPATIBILITY: dict[str, tuple[str, ...]] = {
+    "gb2312": ("gb18030",),
+    "gbk": ("gb18030",),
+    "big5": ("cp950",),
+    "cp950": ("big5",),
+    "shift-jis": ("cp932",),
+    "cp932": ("shift_jis",),
+    "euc-kr": ("cp949",),
+    "cp949": ("euc_kr",),
+}
 
 
 def _canonical_encoding(name: str) -> str:
@@ -91,18 +91,13 @@ def _plausible_text(text: str) -> bool:
 
 
 def _detected_encodings(raw: bytes) -> list[str]:
-    """返回可信的自动检测候选；检测器缺失时安全降级。
+    """返回可信的自动检测候选及同家族严格兼容编码。
 
     短的旧编码文件天然存在歧义。chardet 对中文编码的置信度通常偏
     保守，即使已正确区分 GB18030 与 Big5，因此中文编码使用独立阈值。
     """
     try:
-        from chardet import detect
-    except ImportError:
-        return []
-
-    try:
-        result = detect(raw)
+        result = _detect_encoding(raw)
     except Exception:  # noqa: BLE001 - 检测器故障时仍尝试确定性候选
         return []
     encoding = str(result.get("encoding") or "").strip()
@@ -119,13 +114,30 @@ def _detected_encodings(raw: bytes) -> list[str]:
         "hz",
     }
     minimum = 0.10 if chinese_family else 0.12
-    return [encoding] if confidence >= minimum else []
+    if confidence < minimum:
+        # 很短的西文 CP1252 文本常被检测器以低置信度猜成其他单字节编码。
+        # 只有 ASCII 字母明显多于高位字节、且含 CP1252 标点区字节时才接受
+        # CP1252；纯高位字节文本仍拒绝猜测，避免吞掉东亚/西里尔乱码。
+        ascii_letters = sum(
+            65 <= value <= 90 or 97 <= value <= 122
+            for value in raw
+        )
+        high_bytes = sum(value >= 128 for value in raw)
+        has_cp1252_punctuation = any(128 <= value <= 159 for value in raw)
+        if (
+            ascii_letters >= 3
+            and ascii_letters >= high_bytes
+            and has_cp1252_punctuation
+        ):
+            return ["windows-1252"]
+        return []
+    return [encoding, *_ENCODING_COMPATIBILITY.get(canonical, ())]
 
 
 def decode_text_bytes(raw: bytes, *, source_name: str = "TXT 文件") -> DecodedText:
     """识别任意常见 TXT 编码并返回 Unicode 文本。
 
-    顺序为 BOM → 严格 UTF-8 → chardet → 常见东亚/西文编码。
+    顺序为 BOM → 严格 UTF-8 → chardet 可信候选 → 同编码家族兼容扩展。
     全程使用严格解码；不能可靠识别时抛错，避免用 replacement character 把
     乱码静默送入 LLM。
     """
@@ -162,18 +174,19 @@ def decode_text_bytes(raw: bytes, *, source_name: str = "TXT 文件") -> Decoded
                 byte_length=len(data),
             )
 
-    candidates = _detected_encodings(data)
+    candidates: list[str] = []
     # 无 BOM 的 UTF-16/32 通常含大量 NUL；只在出现该信号时提前尝试，避免把普通
     # 双字节中文编码误当成 UTF-16。
     if data.count(b"\x00") >= max(2, len(data) // 8):
-        candidates = [
-            "utf-32-le",
-            "utf-32-be",
-            "utf-16-le",
-            "utf-16-be",
-            *candidates,
-        ]
-    candidates.extend(_COMMON_ENCODINGS)
+        candidates.extend(
+            [
+                "utf-32-le",
+                "utf-32-be",
+                "utf-16-le",
+                "utf-16-be",
+            ]
+        )
+    candidates.extend(_detected_encodings(data))
 
     attempted: set[str] = set()
     for candidate in candidates:

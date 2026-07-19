@@ -47,7 +47,8 @@ class TerminologistAgent(BaseAgent):
     #: 期望模型档位（结构化抽取，高频轻量调用）
     tier = "fast"
     temperature: float = 0.2
-    max_tokens: int = 1024
+    max_tokens: int = 1536
+    max_terms: int = 24
     structured_json: bool = True
     thinking: str | None = None
 
@@ -67,6 +68,7 @@ class TerminologistAgent(BaseAgent):
 2. 格式固定为 {"terms": [{"source": 源术语, "target": 建议译名, "category": 类别, "confidence": 0~1}]}；
 3. category 仅可取 person/place/skill/item/faction/title/other；
 4. 禁止臆造原文中不存在的术语；拿不准的译名给低 confidence。
+5. 只保留最可能跨章节复用的高价值专名，禁止普通名词、重复项和穷举式抽取。
 TODO: 补 2–3 组网文风格 few-shot（境界名、法宝名）。"""
 
     #: 用户提示词模板：{target_lang} 目标语言 / {chapter_id} 章节 / {source_text} 原文
@@ -110,7 +112,8 @@ TODO: 补 2–3 组网文风格 few-shot（境界名、法宝名）。"""
 
         # 1) LLM 抽取候选术语（JSON 数组；[DRAFT] 占位时走降级路径）
         resp = self.llm.complete(
-            self.SYSTEM_PROMPT,
+            self.SYSTEM_PROMPT
+            + f"\n6. 本次最多返回 {self.max_terms} 条，按重要性与置信度降序。",
             self.build_user_prompt(
                 self.USER_PROMPT_TEMPLATE,
                 target_lang=target_lang,
@@ -151,7 +154,16 @@ TODO: 补 2–3 组网文风格 few-shot（境界名、法宝名）。"""
             previous = by_source.get(candidate.source)
             if previous is None or candidate.confidence > previous.confidence:
                 by_source[candidate.source] = candidate
-        candidates = list(by_source.values())
+        candidates = sorted(
+            by_source.values(),
+            key=lambda item: (-item.confidence, item.source.casefold(), item.target.casefold()),
+        )
+        if len(candidates) > self.max_terms:
+            collected_notes.append(
+                f"术语候选 {len(candidates)} 条，已按置信度和名称稳定保留前 "
+                f"{self.max_terms} 条。"
+            )
+            candidates = candidates[: self.max_terms]
 
         # 确定性命中已有术语。此路径不依赖 LLM，保证离线术语仍能注入。
         known: dict[str, TermEntry] = {}

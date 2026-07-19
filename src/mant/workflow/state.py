@@ -35,8 +35,9 @@ class TranslationState(TypedDict):
         revised_segments / revised: Editor 之后由 Translator 定点修订模式产出的
             分片事实修订稿；没有事实性意见的片段直接沿用初稿。
         polished_segments / polished: 分片润色稿和确定性章级拼接结果。
-        segment_failures: 各阶段按 segment 记录的失败/完整性告警；存在任一
-            条目时章级 QA 不得放行。
+        segment_failures: 各阶段按 segment 记录的失败/完整性告警；``kind`` 区分
+            technical 与 semantic（如安全拒绝的 revision 协议）；存在任一条目时
+            章级 QA 不得放行。
         segment_qa: 每个 segment 的 QA 分数、裁决与明细，章级结果由代码归并。
         rework_segment_indices: QA 或完整性检查标记的定点返工片段序号。
         execution_stats: 本次运行累计的派发、失败、拒绝和 checkpoint 统计。

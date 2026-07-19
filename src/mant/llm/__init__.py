@@ -14,6 +14,7 @@ from mant.llm.client import (
     SUPPORTED_TIERS,
     TIER_FAST,
     TIER_STRONG,
+    LLMBudgetExceeded,
     LLMClient,
     ProviderConfig,
 )
@@ -23,6 +24,7 @@ __all__ = [
     "SUPPORTED_TIERS",
     "TIER_FAST",
     "TIER_STRONG",
+    "LLMBudgetExceeded",
     "LLMClient",
     "ProviderConfig",
 ]

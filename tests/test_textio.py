@@ -6,6 +6,7 @@ from pathlib import Path
 
 import pytest
 
+import mant.textio as textio_module
 from mant.textio import (
     TextDecodingError,
     convert_text_file_to_utf8,
@@ -62,3 +63,33 @@ def test_binary_payload_is_rejected() -> None:
 
     with pytest.raises(TextDecodingError, match="无法可靠识别|二进制"):
         decode_text_bytes(png_header, source_name="image.txt")
+
+
+def test_untrusted_detection_does_not_blindly_accept_a_legacy_codec(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        textio_module,
+        "_detect_encoding",
+        lambda _: {"encoding": None, "confidence": 0.0},
+    )
+    raw = "繁體中文測試".encode("big5")
+
+    with pytest.raises(TextDecodingError, match="无法可靠识别"):
+        decode_text_bytes(raw, source_name="ambiguous.txt")
+
+
+def test_detected_family_can_fall_back_to_a_strict_superset(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        textio_module,
+        "_detect_encoding",
+        lambda _: {"encoding": "GB2312", "confidence": 0.99},
+    )
+    text = "扩展字符：😀"
+
+    decoded = decode_text_bytes(text.encode("gb18030"), source_name="chapter.txt")
+
+    assert decoded.text == text
+    assert decoded.encoding == "gb18030"

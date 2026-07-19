@@ -89,11 +89,16 @@ def _render_review_notes(review_notes: Any) -> str:
     lines: list[str] = []
     for note in review_notes:
         if isinstance(note, dict):
+            note_id = note.get("note_id", "?")
             severity = note.get("severity", "?")
             issue_type = note.get("issue_type", "?")
             suggestion = note.get("suggestion", "")
             span = note.get("span", "")
-            lines.append(f"- [{severity}/{issue_type}] {suggestion}（片段：{span}）")
+            resolution = note.get("resolution", "pending")
+            lines.append(
+                f"- [id={note_id}; {severity}/{issue_type}; state={resolution}] "
+                f"{suggestion}（片段：{span}）"
+            )
         else:
             lines.append(f"- {note}")
     return "\n".join(lines)
@@ -108,6 +113,10 @@ _HIGH_RISK_ISSUE_TYPES = {
     "qa",
 }
 _RESOLVED_NOTE_STATES = {"translation_applied", "revision_applied", "resolved"}
+_REVISION_QA_PENDING_STATES = {
+    "revision_applied_pending_qa",
+    "revision_no_change_pending_qa",
+}
 
 
 def _unresolved_high_risk_notes(review_notes: Any) -> list[dict[str, Any]]:
@@ -125,6 +134,7 @@ def _unresolved_high_risk_notes(review_notes: Any) -> list[dict[str, Any]]:
             severity == "high"
             and issue_type in _HIGH_RISK_ISSUE_TYPES
             and resolution not in _RESOLVED_NOTE_STATES
+            and resolution not in _REVISION_QA_PENDING_STATES
         ):
             unresolved.append(note)
     return unresolved
@@ -189,6 +199,8 @@ class QAAgent(BaseAgent):
 - 总分 = accuracy×0.4 + fluency×0.2 + terminology×0.2 + style×0.2；
   总分与各维度必须达到本次运行给出的阈值方可判 "pass"，否则判 "rework"。
 - 判 "rework" 时必须给出具体、可执行的返工建议（指出问题位置与修改方向）。
+- state=revision_applied_pending_qa 或 revision_no_change_pending_qa 的审校意见
+  必须对照原文和当前译文逐条验证；只有确已落实时才可判 pass。
 
 【输出要求】
 只输出一个紧凑 JSON 对象，不要解释、复述原文、输出代码块或思考过程。

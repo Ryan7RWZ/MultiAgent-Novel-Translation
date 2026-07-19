@@ -2,12 +2,17 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
+import re
+from pathlib import Path
+from tempfile import TemporaryDirectory
 import unittest
 
 from mant.agents.base import AgentTask
 from mant.agents.editor import EditorAgent
 from mant.agents.qa import QAAgent
+from mant.agents.translator import TranslatorAgent
 from mant.workflow.graph import build_graph
 from mant.workflow.state import init_state
 
@@ -68,10 +73,24 @@ class BoundaryQALLM:
         )
 
 
+class RevisionOnlyLLM:
+    def __init__(self, response: str) -> None:
+        self.response = response
+        self.last_notes: list[str] = []
+
+    def complete(self, system: str, user: str, **kwargs: object) -> str:
+        return self.response
+
+
 class QualityLoopLLM:
     """模拟片 0：初译漏掉前置声明，Editor 发现后由 revise 定点补回。"""
 
-    def __init__(self) -> None:
+    def __init__(
+        self,
+        revision_responses: list[str | None] | None = None,
+        *,
+        polisher_response: str = "Authorized site notice.\n---\nBook Title",
+    ) -> None:
         self.last_notes: list[str] = []
         self.calls = {
             "terminologist": 0,
@@ -82,6 +101,11 @@ class QualityLoopLLM:
             "qa": 0,
         }
         self.polisher_users: list[str] = []
+        self.revision_kwargs: list[dict[str, object]] = []
+        self.revision_systems: list[str] = []
+        self.revision_users: list[str] = []
+        self.revision_responses = revision_responses or [None]
+        self.polisher_response = polisher_response
 
     def with_tier(self, _: str) -> "QualityLoopLLM":
         return self
@@ -93,7 +117,15 @@ class QualityLoopLLM:
         if "当前只负责定点修订译文" in system:
             self.calls["revise"] += 1
             self.assert_revision_prompt(system, user)
-            return "Authorized site notice.\n---\nBook Title"
+            self.revision_kwargs.append(dict(kwargs))
+            self.revision_systems.append(system)
+            self.revision_users.append(user)
+            response_index = min(
+                self.calls["revise"] - 1,
+                len(self.revision_responses) - 1,
+            )
+            response = self.revision_responses[response_index]
+            return response or self.valid_revision_response(system)
         if "资深网络小说译者" in system:
             self.calls["translate"] += 1
             return "Book Title"
@@ -115,7 +147,7 @@ class QualityLoopLLM:
         if "英文网络小说润色师" in system:
             self.calls["polisher"] += 1
             self.polisher_users.append(user)
-            return "Authorized site notice.\n---\nBook Title"
+            return self.polisher_response
         if "翻译质量终审专家" in system:
             self.calls["qa"] += 1
             return json.dumps(
@@ -134,8 +166,32 @@ class QualityLoopLLM:
     def assert_revision_prompt(system: str, user: str) -> None:
         if "补回站点声明与分隔线" not in system:
             raise AssertionError("定点修订没有收到 Editor 的 high 意见")
-        if "【当前译文】\nBook Title" not in user:
-            raise AssertionError("定点修订没有收到原始初稿")
+        if '"unit_id": "u0001"' not in user or '"text": "Book Title"' not in user:
+            raise AssertionError("定点修订没有收到程序生成的译文单元")
+        if "unit_id、expected_hash 和 note_id" not in system:
+            raise AssertionError("定点修订没有要求引用程序生成的稳定 ID")
+
+    @staticmethod
+    def valid_revision_response(system: str) -> str:
+        match = re.search(r"id=([^;\]]+)", system)
+        if match is None:
+            raise AssertionError("定点修订 Prompt 缺少 note_id")
+        return json.dumps(
+            {
+                "status": "apply",
+                "operations": [
+                    {
+                        "action": "insert_before_unit",
+                        "unit_id": "u0001",
+                        "expected_hash": hashlib.sha256(
+                            b"Book Title"
+                        ).hexdigest()[:12],
+                        "note_ids": [match.group(1)],
+                        "text": "Authorized site notice.\n---\n",
+                    }
+                ],
+            }
+        )
 
 
 class TestQualityLoop(unittest.TestCase):
@@ -185,13 +241,275 @@ class TestQualityLoop(unittest.TestCase):
         self.assertEqual(final["segment_failures"], [])
         self.assertEqual(llm.calls["translate"], 1)
         self.assertEqual(llm.calls["revise"], 1)
+        self.assertEqual(
+            llm.revision_kwargs[0]["response_format"],
+            {"type": "json_object"},
+        )
+        self.assertEqual(llm.revision_kwargs[0]["max_tokens"], 1536)
         high_note = next(
             note
             for note in final["review_notes"]
             if isinstance(note, dict) and note.get("severity") == "high"
         )
-        self.assertEqual(high_note["resolution"], "revision_applied")
+        self.assertEqual(high_note["revision_resolution"], "applied")
+        self.assertEqual(high_note["resolution"], "resolved")
+        self.assertEqual(high_note["qa_resolution"], "verified")
         self.assertNotIn("补回站点声明", llm.polisher_users[0])
+
+    def test_partial_revision_text_is_rejected_then_recovered_as_patch(self) -> None:
+        llm = QualityLoopLLM(
+            revision_responses=[
+                "Authorized site notice.",
+                None,
+            ]
+        )
+        app = build_graph(llm, None, max_rework=0)  # type: ignore[arg-type]
+        final = app.invoke(
+            init_state(
+                "demo",
+                "front-matter",
+                ["授权站点声明。\n---\n《书名》"],
+                max_rework=0,
+            )
+        )
+
+        expected = "Authorized site notice.\n---\nBook Title"
+        self.assertEqual(final["revised"], expected)
+        self.assertEqual(final["polished"], expected)
+        self.assertEqual(final["segment_failures"], [])
+        self.assertEqual(llm.calls["revise"], 2)
+        self.assertEqual(llm.revision_kwargs[1]["max_tokens"], 1024)
+        self.assertIn("【上次确定性校验错误】", llm.revision_users[1])
+        self.assertIn("修订输出必须是 JSON object", llm.revision_users[1])
+        self.assertTrue(
+            any("进行错误感知重试" in note for note in final["runtime_notes"])
+        )
+
+    def test_duplicate_text_in_different_units_is_addressed_by_unit_id(self) -> None:
+        second = "Book returns."
+        llm = RevisionOnlyLLM(
+            json.dumps(
+                {
+                    "status": "apply",
+                    "operations": [
+                        {
+                            "action": "replace_unit",
+                            "unit_id": "u0002",
+                            "expected_hash": hashlib.sha256(
+                                second.encode("utf-8")
+                            ).hexdigest()[:12],
+                            "note_ids": ["note-0001"],
+                            "text": "The notice returns.",
+                        }
+                    ]
+                }
+            )
+        )
+        agent = TranslatorAgent(llm)  # type: ignore[arg-type]
+        agent.revision_repair_attempts = 0
+        result = agent.run(
+            AgentTask(
+                "demo",
+                "front-matter",
+                "front-matter#seg0000",
+                "原文",
+                {
+                    "mode": "revision",
+                    "draft": "Book appears. Book returns.",
+                    "review_notes": [
+                        {
+                            "severity": "high",
+                            "issue_type": "omission",
+                            "suggestion": "补回声明",
+                        }
+                    ],
+                },
+            )
+        )
+
+        self.assertTrue(result.ok)
+        self.assertEqual(result.output["revision_status"], "applied")
+        self.assertEqual(result.output["draft"], "Book appears. The notice returns.")
+
+    def test_stale_unit_hash_is_semantically_rejected_without_task_failure(self) -> None:
+        llm = RevisionOnlyLLM(
+            json.dumps(
+                {
+                    "status": "apply",
+                    "operations": [
+                        {
+                            "action": "replace_unit",
+                            "unit_id": "u0001",
+                            "expected_hash": "stale",
+                            "note_ids": ["note-0001"],
+                            "text": "Notice.",
+                        }
+                    ],
+                }
+            )
+        )
+        agent = TranslatorAgent(llm)  # type: ignore[arg-type]
+        agent.revision_repair_attempts = 0
+        result = agent.run(
+            AgentTask(
+                "demo",
+                "front-matter",
+                "front-matter#seg0000",
+                "原文",
+                {
+                    "mode": "revision",
+                    "draft": "Book Title",
+                    "review_notes": [
+                        {
+                            "severity": "high",
+                            "issue_type": "omission",
+                            "suggestion": "补回声明",
+                        }
+                    ],
+                },
+            )
+        )
+
+        self.assertTrue(result.ok)
+        self.assertEqual(result.output["revision_status"], "protocol_rejected")
+        self.assertEqual(result.output["draft"], "Book Title")
+        self.assertIn("正确值为", result.output["revision_error"])
+
+    def test_no_change_evidence_stays_pending_until_qa_passes(self) -> None:
+        class NoChangeLLM(QualityLoopLLM):
+            complete_text = "Authorized site notice.\n---\nBook Title"
+
+            def complete(self, system: str, user: str, **kwargs: object) -> str:
+                if "当前只负责定点修订译文" in system:
+                    self.calls["revise"] += 1
+                    self.revision_kwargs.append(dict(kwargs))
+                    self.revision_systems.append(system)
+                    self.revision_users.append(user)
+                    match = re.search(r"id=([^;\]]+)", system)
+                    assert match is not None
+                    first = "Authorized site notice."
+                    return json.dumps(
+                        {
+                            "status": "no_change",
+                            "operations": [],
+                            "evidence": [
+                                {
+                                    "note_id": match.group(1),
+                                    "unit_id": "u0001",
+                                    "expected_hash": hashlib.sha256(
+                                        first.encode("utf-8")
+                                    ).hexdigest()[:12],
+                                    "quote": first,
+                                }
+                            ],
+                        }
+                    )
+                if "资深网络小说译者" in system:
+                    self.calls["translate"] += 1
+                    return self.complete_text
+                if "英文网络小说润色师" in system:
+                    self.calls["polisher"] += 1
+                    self.polisher_users.append(user)
+                    return self.complete_text
+                return super().complete(system, user, **kwargs)
+
+        llm = NoChangeLLM()
+        app = build_graph(llm, None, max_rework=0)  # type: ignore[arg-type]
+        final = app.invoke(
+            init_state(
+                "demo",
+                "front-matter",
+                ["授权站点声明。\n---\n《书名》"],
+                max_rework=0,
+            )
+        )
+
+        note = next(item for item in final["review_notes"] if isinstance(item, dict))
+        self.assertEqual(final["qa_verdict"], "pass")
+        self.assertEqual(final["segment_failures"], [])
+        self.assertEqual(note["revision_resolution"], "no_change")
+        self.assertEqual(note["resolution"], "resolved")
+        self.assertEqual(note["qa_resolution"], "verified")
+
+    def test_protocol_rejection_is_semantic_and_does_not_open_circuit(self) -> None:
+        invalid = json.dumps(
+            {
+                "operations": [
+                    {
+                        "action": "insert_before",
+                        "anchor": "Book Title",
+                        "text": "Notice.",
+                    }
+                ]
+            }
+        )
+        llm = QualityLoopLLM(
+            revision_responses=[invalid, invalid],
+            polisher_response="Book Title",
+        )
+        app = build_graph(
+            llm,
+            None,
+            max_rework=0,
+            execution_config={
+                "budget": {"max_failures": 1, "max_failures_per_stage": {"revise": 1}}
+            },
+        )  # type: ignore[arg-type]
+        final = app.invoke(
+            init_state(
+                "demo",
+                "front-matter",
+                ["授权站点声明。\n---\n《书名》"],
+                max_rework=0,
+            )
+        )
+
+        self.assertEqual(final["execution_stats"]["failed"], 0)
+        self.assertEqual(final["execution_stats"]["rejected"], 0)
+        self.assertEqual(final["qa_verdict"], "rework")
+        self.assertEqual(len(final["segment_failures"]), 1)
+        self.assertEqual(final["segment_failures"][0]["kind"], "semantic")
+        self.assertIn("unit-ID", final["segment_failures"][0]["reason"])
+
+    def test_revision_protocol_change_reuses_non_revision_checkpoints(self) -> None:
+        with TemporaryDirectory() as tmp:
+            execution = {
+                "checkpoint": {
+                    "enabled": True,
+                    "sqlite_path": str(Path(tmp) / "checkpoints.db"),
+                }
+            }
+            state = init_state(
+                "demo",
+                "front-matter",
+                ["授权站点声明。\n---\n《书名》"],
+                max_rework=0,
+                run_id="run-stage-local-revision-fingerprint",
+            )
+            first_llm = QualityLoopLLM()
+            build_graph(
+                first_llm, None, max_rework=0, execution_config=execution
+            ).invoke(state)  # type: ignore[arg-type]
+
+            original = TranslatorAgent.REVISION_UNIT_REPAIR_SYSTEM_PROMPT
+            try:
+                TranslatorAgent.REVISION_UNIT_REPAIR_SYSTEM_PROMPT = (
+                    original + "\n协议版本测试标记。"
+                )
+                second_llm = QualityLoopLLM()
+                final = build_graph(
+                    second_llm, None, max_rework=0, execution_config=execution
+                ).invoke(state)  # type: ignore[arg-type]
+            finally:
+                TranslatorAgent.REVISION_UNIT_REPAIR_SYSTEM_PROMPT = original
+
+        self.assertEqual(final["execution_stats"]["checkpoint_hits"], 5)
+        self.assertEqual(final["execution_stats"]["submitted"], 1)
+        self.assertEqual(second_llm.calls["revise"], 1)
+        self.assertEqual(second_llm.calls["translate"], 0)
+        self.assertEqual(second_llm.calls["editor"], 0)
+        self.assertEqual(second_llm.calls["polisher"], 0)
+        self.assertEqual(second_llm.calls["qa"], 0)
 
     def test_qa_does_not_override_explicit_rework_at_threshold_boundary(self) -> None:
         agent = QAAgent(BoundaryQALLM())  # type: ignore[arg-type]

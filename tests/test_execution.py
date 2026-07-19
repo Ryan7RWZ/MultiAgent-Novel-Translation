@@ -35,15 +35,20 @@ class _CollectSink:
         pass
 
 
-def _tasks(count: int, *, run_id: str = "run-execution") -> list[StageTask]:
+def _tasks(
+    count: int,
+    *,
+    run_id: str = "run-execution",
+    stage: str = "translate",
+) -> list[StageTask]:
     return [
         StageTask(
             run_id=run_id,
             segment_id=f"chapter#seg{index:04d}",
             segment_index=index,
-            stage="translate",
+            stage=stage,
             round=0,
-            input_hash=f"hash-{index}",
+            input_hash=f"{stage}-hash-{index}",
         )
         for index in range(count)
     ]
@@ -87,6 +92,74 @@ def test_concurrent_stage_is_bounded_and_merges_in_segment_order() -> None:
     ]
     assert 2 <= peak <= 3
     assert executor.stats()["peak_in_flight"] == 3
+
+
+def test_twenty_workers_across_six_stages_preserve_order_and_checkpoint() -> None:
+    stages = ("terminology", "translate", "edit", "revise", "polish", "qa")
+    with TemporaryDirectory() as tmp:
+        checkpoint_path = Path(tmp) / "checkpoints.db"
+        executor = StageExecutor(
+            ExecutionConfig.from_mapping(
+                {
+                    "enabled": True,
+                    "global_max_in_flight": 20,
+                    "stages": {stage: 20 for stage in stages},
+                    "checkpoint": {
+                        "enabled": True,
+                        "sqlite_path": str(checkpoint_path),
+                    },
+                }
+            )
+        )
+        active_by_stage = {stage: 0 for stage in stages}
+        peak_by_stage = {stage: 0 for stage in stages}
+        lock = threading.Lock()
+
+        def worker(task: StageTask) -> SimpleNamespace:
+            with lock:
+                active_by_stage[task.stage] += 1
+                peak_by_stage[task.stage] = max(
+                    peak_by_stage[task.stage],
+                    active_by_stage[task.stage],
+                )
+            try:
+                time.sleep(0.01)
+                return SimpleNamespace(
+                    ok=True,
+                    output={"value": f"{task.stage}-{task.segment_index}"},
+                    notes=[],
+                )
+            finally:
+                with lock:
+                    active_by_stage[task.stage] -= 1
+
+        for stage in stages:
+            tasks = _tasks(21, run_id="run-concurrency-20", stage=stage)
+            results = executor.run(stage, reversed(tasks), worker)
+            assert [item.task.segment_index for item in results] == list(range(21))
+            assert [item.value.output["value"] for item in results] == [
+                f"{stage}-{index}" for index in range(21)
+            ]
+            assert executor.checkpoints is not None
+            assert executor.checkpoints.counts("run-concurrency-20", stage) == {
+                "success": 21,
+                "failed": 0,
+                "total": 21,
+            }
+
+        assert peak_by_stage == {stage: 20 for stage in stages}
+        assert executor.stats() == {
+            "enabled": True,
+            "submitted": 21 * len(stages),
+            "completed": 21 * len(stages),
+            "failed": 0,
+            "failed_by_stage": {},
+            "rejected": 0,
+            "checkpoint_hits": 0,
+            "checkpoint_errors": 0,
+            "peak_in_flight": 20,
+            "cancelled": False,
+        }
 
 
 def test_context_is_copied_to_workers_and_events_keep_segment_identity() -> None:
