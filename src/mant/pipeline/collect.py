@@ -10,7 +10,7 @@
     - ``WebNovelCollector``：网络爬虫采集（仅留骨架，实现前必须阅读其 docstring
       顶部的版权合规红线）。
 
-第三方依赖规则：本模块仅使用标准库。
+编码识别统一复用 ``mant.textio``；检测器不可用时仍保留常见编码降级路径。
 """
 
 from __future__ import annotations
@@ -19,6 +19,8 @@ import abc
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Iterable
+
+from mant.textio import read_text_file
 
 __all__ = ["RawDocument", "Collector", "LocalTxtCollector", "WebNovelCollector"]
 
@@ -61,20 +63,6 @@ class Collector(abc.ABC):
     def collect(self) -> list[RawDocument]:
         """执行采集，返回原始文档列表。"""
         raise NotImplementedError
-
-
-def _read_text(path: Path) -> str:
-    """读取文本文件：优先 UTF-8，回退 GB18030，最后 UTF-8 + errors=replace。
-
-    中文网络小说常见 GBK/GB18030 编码，这里做宽容处理，保证采集不中断。
-    """
-    raw = path.read_bytes()
-    for encoding in ("utf-8", "gb18030"):
-        try:
-            return raw.decode(encoding)
-        except UnicodeDecodeError:
-            continue
-    return raw.decode("utf-8", errors="replace")  # 兜底：替换乱码字符，交由 clean 阶段清理
 
 
 class LocalTxtCollector(Collector):
@@ -129,6 +117,7 @@ class LocalTxtCollector(Collector):
                 for fp in sorted(role_dir.glob(self.pattern)):
                     if not fp.is_file():
                         continue
+                    decoded = read_text_file(fp)
                     docs.append(
                         RawDocument(
                             work_id=work_dir.name,
@@ -136,8 +125,12 @@ class LocalTxtCollector(Collector):
                             role=role,
                             lang=lang,
                             title=fp.stem,
-                            text=_read_text(fp),
+                            text=decoded.text,
                             path=str(fp),
+                            meta={
+                                "source_encoding": decoded.encoding,
+                                "converted_to": "utf-8",
+                            },
                         )
                     )
         return docs

@@ -84,6 +84,7 @@ flowchart TB
 | `work_id` | `str` | 入口 | 作品 ID（关联记忆层一切数据） |
 | `chapter_id` | `str` | 入口 | 章节 ID |
 | `run_id` | `str` | 入口 | 运行/checkpoint 命名空间；恢复时保持不变 |
+| `source_encoding` | `str` | 入口 | 用户 TXT 被统一转为 UTF-8 前识别出的原编码 |
 | `source_text` | `str` | 入口 | 安全规范化后的无损章级原文 |
 | `segments` | `list[str]` | 入口 | 待译原文段列表（按段推进） |
 | `segment_meta` | `list[dict]` | 入口 | 定位、边界、哈希与相邻上下文；与 segments 等长 |
@@ -110,6 +111,10 @@ flowchart TB
 闭包中，避免章节间串数据。正式入口 `run_chapter` 每次运行独立构图，使执行预算、
 取消信号和统计也保持 run 级隔离。LLM token 增量只进入事件总线，不进入 state，
 避免高频增量触发 LangGraph checkpoint 膨胀。
+
+所有用户 TXT 入口在机械切片前先读取原始字节，按 BOM 和编码检测严格解码。
+后续 state、工作副本和浏览器提交均使用 UTF-8，不覆盖用户原文件；不可靠
+的歧义编码和明显二进制输入直接拒绝，不使用替换字符静默降级。
 
 ### 3.2 主流程时序
 

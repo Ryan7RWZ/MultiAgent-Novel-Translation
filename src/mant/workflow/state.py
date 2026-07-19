@@ -21,6 +21,7 @@ class TranslationState(TypedDict):
         work_id: 作品 ID（贯穿记忆层：术语库 / TM / 小说圣经的命名空间）。
         chapter_id: 章节 ID（一般为文件名或章节号）。
         run_id: 运行标识；checkpoint 恢复时必须沿用同一个值。
+        source_encoding: 用户 TXT 被统一解码前识别出的原始编码。
         source_text: 安全规范化后的完整原文。所有章级 Agent 使用该字段，避免
             重新拼接片段时增删空白。
         segments: 调度 Agent 切分后的原文片段列表，按序翻译；入口写入后不变。
@@ -53,6 +54,7 @@ class TranslationState(TypedDict):
     work_id: str
     chapter_id: str
     run_id: str
+    source_encoding: str
     source_text: str
     segments: list[str]
     segment_meta: list[dict]
@@ -89,6 +91,7 @@ def init_state(
     segment_meta: list[dict] | None = None,
     segmentation_stats: dict[str, Any] | None = None,
     run_id: str = "",
+    source_encoding: str = "utf-8",
 ) -> TranslationState:
     """构造初始状态的便捷工厂（骨架）。
 
@@ -99,6 +102,7 @@ def init_state(
         work_id=work_id,
         chapter_id=chapter_id,
         run_id=str(run_id),
+        source_encoding=str(source_encoding or "utf-8"),
         source_text="".join(segments) if source_text is None else str(source_text),
         segments=list(segments),
         segment_meta=list(segment_meta or []),

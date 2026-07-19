@@ -150,6 +150,7 @@ def cmd_baseline(args: argparse.Namespace) -> int:
                 "type": "injection_stats",
                 "work_id": result["work_id"],
                 "chapter_id": result["chapter_id"],
+                "input_encoding": result["input_encoding"],
                 **result["injection_stats"],
             }
             fh.write(json.dumps(stats, ensure_ascii=False) + "\n")
@@ -256,6 +257,7 @@ def cmd_translate_chapter(args: argparse.Namespace) -> int:
             ),
             "work_id": work_id,
             "chapter_id": chapter_id,
+            "input_encoding": final.get("source_encoding", "utf-8"),
             "output": str(output_path),
             "segments": len(final.get("segments") or []),
             "segmentation": final.get("segmentation_stats") or {},

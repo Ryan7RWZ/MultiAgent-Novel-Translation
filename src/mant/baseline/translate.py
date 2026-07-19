@@ -114,7 +114,7 @@ class BaselineTranslator:
 
         参数:
             work_id: 作品 ID（术语库 / TM 的命名空间，与记忆层一致）。
-            chapter_path: 章节原文 txt 文件路径（UTF-8）。
+            chapter_path: 章节原文 TXT 文件路径；常见编码会自动识别并统一解码。
             memory: 记忆层门面；传 None 时退化为无注入纯直译（统计为 0）。
             llm: LLM 客户端（未配置 API key 时按其约定返回 ``[DRAFT]`` 占位）。
 
@@ -130,7 +130,10 @@ class BaselineTranslator:
               术语表 / 翻译记忆块恒为占位行而看不到实际注入的约定译法。
         """
         chapter_path = Path(chapter_path)
-        text = chapter_path.read_text(encoding="utf-8")
+        from mant.textio import read_text_file
+
+        decoded_input = read_text_file(chapter_path)
+        text = decoded_input.text
         # 与 M1/多智能体主流程统一基础清洗，避免广告行进入模型与实验结果。
         from mant.pipeline.clean import clean_text
 
@@ -179,6 +182,7 @@ class BaselineTranslator:
             "work_id": work_id,
             "chapter_id": chapter_path.stem,
             "target_lang": self.target_lang,
+            "input_encoding": decoded_input.encoding,
             "segments": segments,
             "translations": translations,
             "injection_stats": stats,
