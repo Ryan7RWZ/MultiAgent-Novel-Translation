@@ -225,6 +225,54 @@ def test_successful_checkpoint_is_reused_without_calling_worker_again() -> None:
         assert second_executor.stats()["checkpoint_hits"] == 1
 
 
+def test_qa_failed_only_resume_retries_semantic_rework_checkpoint() -> None:
+    with TemporaryDirectory() as tmp:
+        checkpoint_path = Path(tmp) / "checkpoints.db"
+        base = {
+            "checkpoint": {
+                "enabled": True,
+                "sqlite_path": str(checkpoint_path),
+            }
+        }
+        calls: list[int] = []
+
+        def first_worker(task: StageTask) -> SimpleNamespace:
+            calls.append(task.segment_index)
+            verdict = "rework" if task.segment_index == 1 else "pass"
+            return SimpleNamespace(
+                ok=True,
+                output={"qa_verdict": verdict},
+                notes=[],
+            )
+
+        tasks = _tasks(2, run_id="run-semantic-qa", stage="qa")
+        StageExecutor(ExecutionConfig.from_mapping(base)).run(
+            "qa", tasks, first_worker
+        )
+
+        def resumed_worker(task: StageTask) -> SimpleNamespace:
+            calls.append(task.segment_index)
+            return SimpleNamespace(
+                ok=True,
+                output={"qa_verdict": "pass"},
+                notes=[],
+            )
+
+        resumed = StageExecutor(
+            ExecutionConfig.from_mapping(
+                {
+                    **base,
+                    "resume": {"stage": "qa", "failed_only": True},
+                }
+            )
+        ).run("qa", tasks, resumed_worker)
+
+        assert calls == [0, 1, 1]
+        assert resumed[0].from_checkpoint
+        assert not resumed[1].from_checkpoint
+        assert resumed[1].value.output["qa_verdict"] == "pass"
+
+
 def test_checkpoint_can_report_and_read_failed_task_for_diagnostics() -> None:
     with TemporaryDirectory() as tmp:
         store = CheckpointStore(Path(tmp) / "checkpoints.db")

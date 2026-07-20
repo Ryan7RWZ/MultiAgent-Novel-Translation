@@ -38,6 +38,9 @@ class _RevisionDecision:
     note_ids: tuple[str, ...] = ()
     operation_count: int = 0
     error: str = ""
+    valid_operations: tuple[dict[str, Any], ...] = ()
+    missing_note_ids: tuple[str, ...] = ()
+    normalized_no_change: bool = False
 
 
 _REVISION_SENTENCE_ENDINGS = frozenset(".!?。！？")
@@ -507,6 +510,7 @@ class TranslatorAgent(BaseAgent):
         }
         by_unit: dict[str, tuple[str, str]] = {}
         covered_notes: set[str] = set()
+        validated_operations: list[dict[str, Any]] = []
         for index, operation in enumerate(operations, start=1):
             if not isinstance(operation, dict):
                 return _RevisionDecision(
@@ -590,11 +594,25 @@ class TranslatorAgent(BaseAgent):
                         ),
                     )
             by_unit[unit_id] = (action, replacement)
+            validated_operation: dict[str, Any] = {
+                "action": action,
+                "unit_id": unit_id,
+                "expected_hash": unit.expected_hash,
+                "note_ids": sorted(operation_note_ids),
+            }
+            if action != "delete_unit":
+                validated_operation["text"] = replacement
+            validated_operations.append(validated_operation)
 
         if covered_notes != expected_notes:
             missing = sorted(expected_notes - covered_notes)
             return _RevisionDecision(
-                "rejected", error=f"operations 未覆盖批注：{missing}"
+                "rejected",
+                note_ids=tuple(sorted(covered_notes)),
+                operation_count=len(validated_operations),
+                error=f"operations 未覆盖批注：{missing}",
+                valid_operations=tuple(validated_operations),
+                missing_note_ids=tuple(missing),
             )
 
         pieces: list[str] = []
@@ -618,12 +636,28 @@ class TranslatorAgent(BaseAgent):
         pieces.append(draft[cursor:])
         revised = "".join(pieces)
         if revised == draft:
+            all_identity_replacements = all(
+                operation["action"] == "replace_unit"
+                and operation.get("text")
+                == unit_by_id[str(operation["unit_id"])].text
+                for operation in validated_operations
+            )
+            if all_identity_replacements:
+                return _RevisionDecision(
+                    "no_change",
+                    draft=draft,
+                    note_ids=tuple(sorted(covered_notes)),
+                    operation_count=len(validated_operations),
+                    valid_operations=tuple(validated_operations),
+                    normalized_no_change=True,
+                )
             return _RevisionDecision("rejected", error="补丁应用后译文没有变化")
         return _RevisionDecision(
             "applied",
             draft=revised,
             note_ids=tuple(sorted(covered_notes)),
             operation_count=len(operations),
+            valid_operations=tuple(validated_operations),
         )
 
     def _run_revision(self, task: AgentTask) -> AgentResult:
@@ -671,6 +705,8 @@ class TranslatorAgent(BaseAgent):
         attempts = max(0, self.revision_repair_attempts) + 1
         previous_reason = ""
         previous_raw = ""
+        preserved_operations: tuple[dict[str, Any], ...] = ()
+        missing_note_ids: tuple[str, ...] = ()
         for attempt in range(attempts):
             active_system = system
             active_user = user
@@ -679,11 +715,30 @@ class TranslatorAgent(BaseAgent):
                 active_system = (
                     f"{system}\n\n{self.REVISION_UNIT_REPAIR_SYSTEM_PROMPT}"
                 )
+                required_note_ids = expected_note_ids
+                incremental_context = ""
+                if preserved_operations and missing_note_ids:
+                    required_note_ids = list(missing_note_ids)
+                    remaining_operations = (
+                        self.revision_max_operations - len(preserved_operations)
+                    )
+                    incremental_context = (
+                        "\n\n【已冻结的合法 operations（禁止修改，也禁止重复其 unit_id）】\n"
+                        + json.dumps(
+                            list(preserved_operations),
+                            ensure_ascii=False,
+                            indent=2,
+                        )
+                        + "\n\n本次只输出覆盖缺失 note_id 的 apply operations；"
+                        "不要重复已冻结操作，不要输出 no_change。"
+                        f"最多还能提交 {remaining_operations} 个 operation。"
+                    )
                 active_user = (
                     f"{user}\n\n【上次确定性校验错误】\n{previous_reason}"
                     f"\n\n【上次无效输出（禁止原样重复）】\n{previous_raw[-4000:]}"
                     f"\n\n【有效 unit_id】\n{', '.join(unit.unit_id for unit in units)}"
-                    f"\n\n【必须覆盖的 note_id】\n{', '.join(expected_note_ids)}"
+                    f"\n\n【本次必须覆盖的 note_id】\n{', '.join(required_note_ids)}"
+                    f"{incremental_context}"
                 )
                 max_tokens = self.revision_repair_max_tokens
             try:
@@ -726,10 +781,67 @@ class TranslatorAgent(BaseAgent):
 
             parse_notes: list[str] = []
             parsed = self.parse_json_output(raw, notes=parse_notes)
-            decision = self._apply_revision_patch(
-                draft, units, parsed, expected_note_ids
-            )
+            if attempt and preserved_operations and missing_note_ids:
+                repair_operations = (
+                    parsed.get("operations") if isinstance(parsed, dict) else None
+                )
+                remaining_operations = (
+                    self.revision_max_operations - len(preserved_operations)
+                )
+                if not isinstance(parsed, dict) or str(
+                    parsed.get("status") or ""
+                ).strip().lower() != "apply":
+                    decision = _RevisionDecision(
+                        "rejected",
+                        error="增量恢复必须返回 status=apply",
+                    )
+                elif not isinstance(repair_operations, list) or not repair_operations:
+                    decision = _RevisionDecision(
+                        "rejected",
+                        error="增量恢复必须返回非空 operations",
+                    )
+                elif len(repair_operations) > remaining_operations:
+                    decision = _RevisionDecision(
+                        "rejected",
+                        error=(
+                            f"增量恢复 operations 数量 {len(repair_operations)} "
+                            f"超过剩余上限 {remaining_operations}"
+                        ),
+                    )
+                else:
+                    repair_decision = self._apply_revision_patch(
+                        draft,
+                        units,
+                        parsed,
+                        list(missing_note_ids),
+                    )
+                    if repair_decision.status in {"applied", "no_change"} and (
+                        repair_decision.valid_operations
+                    ):
+                        combined_payload = {
+                            "status": "apply",
+                            "operations": [
+                                *preserved_operations,
+                                *repair_decision.valid_operations,
+                            ],
+                        }
+                        decision = self._apply_revision_patch(
+                            draft,
+                            units,
+                            combined_payload,
+                            expected_note_ids,
+                        )
+                    else:
+                        decision = repair_decision
+            else:
+                decision = self._apply_revision_patch(
+                    draft, units, parsed, expected_note_ids
+                )
             if decision.status in {"applied", "no_change"}:
+                if decision.normalized_no_change:
+                    notes.append(
+                        "合法的全同文 replace_unit 已安全归一为 no_change，等待 QA 验证"
+                    )
                 return self._result(
                     ok=True,
                     output={
@@ -746,6 +858,21 @@ class TranslatorAgent(BaseAgent):
             previous_reason = reason
             previous_raw = raw
             if attempt + 1 < attempts:
+                if (
+                    decision.valid_operations
+                    and decision.missing_note_ids
+                    and len(decision.valid_operations)
+                    < self.revision_max_operations
+                ):
+                    preserved_operations = decision.valid_operations
+                    missing_note_ids = decision.missing_note_ids
+                    notes.append(
+                        "已冻结通过校验的修订操作；重试仅补齐缺失 note_id："
+                        + ", ".join(missing_note_ids)
+                    )
+                else:
+                    preserved_operations = ()
+                    missing_note_ids = ()
                 notes.append(f"unit-ID 修订补丁无效，进行错误感知重试：{reason}")
             else:
                 notes.extend(parse_notes)

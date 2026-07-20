@@ -100,10 +100,14 @@ class BaseAgent(ABC):
     `replace_unit / insert_before_unit / insert_after_unit / delete_unit` 操作。所有
     操作先完整校验，再基于原快照一次性重建，避免重复字符串和顺序替换歧义；
   - 每个操作必须关联 `note_ids`，并覆盖本片全部事实批注。坏 JSON、未知/陈旧 ID、
-    hash 不匹配或无变化时，把具体校验错误和有效 ID 注入一次短修复；仍失败则安全
+    hash 不匹配或冲突的无变化时，把具体校验错误和有效 ID 注入一次短修复。若操作
+    均已通过安全校验但只漏了部分 `note_id`，代码冻结这些合法操作，修复请求只能在
+    剩余操作额度内覆盖缺失批注，随后把新旧操作合并并重新完整校验；仍失败则安全
     保留原稿并标记 `protocol_rejected`，但不把语义拒绝计入供应商/调度技术熔断；
   - `no_change` 必须为每条批注提供可校验的 unit/hash/quote 证据。补丁应用或
-    no-change 都只进入 `pending_qa`，该片 QA 通过后才能把批注关闭。
+    no-change 都只进入 `pending_qa`，该片 QA 通过后才能把批注关闭。若 `apply`
+    覆盖全部批注、所有操作都是内容逐字相同的 `replace_unit`，代码会把它归一为同等
+    安全的 `no_change_pending_qa`；包含 insert/delete 或其他组合的无变化仍拒绝。
 - **分档建议**：strong。初译质量决定后续环节负担，是成本最不该省的位置。
 
 ### 3.4 审校 Agent（editor）

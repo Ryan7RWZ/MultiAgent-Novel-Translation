@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import json
+import hashlib
+import re
 import tempfile
 import threading
 import time
@@ -11,7 +13,7 @@ from pathlib import Path
 
 from mant.cli import main as cli_main
 from mant.execution import RunManifestStore
-from mant.workflow.graph import build_graph, run_chapter
+from mant.workflow.graph import _prepare_resume_state, build_graph, run_chapter
 from mant.workflow.state import init_state
 
 
@@ -342,6 +344,154 @@ class TestWorkflow(unittest.TestCase):
         self.assertEqual(second["qa_verdict"], "pass")
         self.assertEqual(second["qa_summary"]["coverage"], 1.0)
         self.assertEqual(second["qa_summary"]["pass_ratio"], 1.0)
+
+    def test_revision_resume_only_reruns_problem_segment_through_qa(self) -> None:
+        class RevisionResumeLLM:
+            def __init__(self) -> None:
+                self.last_notes: list[str] = []
+                self.revision_fixed = False
+                self.calls: dict[tuple[str, str], int] = {}
+
+            def with_tier(self, _: str) -> "RevisionResumeLLM":
+                return self
+
+            def _record(self, role: str, segment: str) -> None:
+                key = (role, segment)
+                self.calls[key] = self.calls.get(key, 0) + 1
+
+            def complete(self, system: str, user: str, **_: object) -> str:
+                segment = "bad" if "BAD" in user or "Bad draft" in user else "good"
+                if "术语抽取专家" in system:
+                    self._record("terminology", segment)
+                    return "[]"
+                if "当前只负责定点修订译文" in system:
+                    self._record("revise", segment)
+                    if not self.revision_fixed:
+                        return '{"status":"apply","operations":[]}'
+                    note_ids = re.findall(r"id=([^;\]]+)", system)
+                    assert note_ids
+                    return json.dumps(
+                        {
+                            "status": "apply",
+                            "operations": [
+                                {
+                                    "action": "replace_unit",
+                                    "unit_id": "u0001",
+                                    "expected_hash": hashlib.sha256(
+                                        b"Bad draft."
+                                    ).hexdigest()[:12],
+                                    "note_ids": note_ids,
+                                    "text": "Bad draft fixed.",
+                                }
+                            ],
+                        }
+                    )
+                if "资深网络小说译者" in system:
+                    self._record("translate", segment)
+                    return "Bad draft." if segment == "bad" else "Good draft."
+                if "翻译审校编辑" in system:
+                    self._record("edit", segment)
+                    if segment == "bad":
+                        return json.dumps(
+                            {
+                                "review_notes": [
+                                    {
+                                        "issue_type": "mistranslation",
+                                        "span": "Bad draft.",
+                                        "suggestion": "修正坏片",
+                                        "severity": "high",
+                                    }
+                                ]
+                            },
+                            ensure_ascii=False,
+                        )
+                    return "[]"
+                if "英文网络小说润色师" in system:
+                    self._record("polish", segment)
+                    if "Bad draft fixed." in user:
+                        return "Bad polished fixed."
+                    return "Bad polished." if segment == "bad" else "Good polished."
+                if "翻译质量终审专家" in system:
+                    self._record("qa", segment)
+                    return json.dumps(
+                        {
+                            "accuracy": 9,
+                            "fluency": 9,
+                            "terminology": 9,
+                            "style": 9,
+                            "verdict": "pass",
+                            "suggestions": [],
+                        }
+                    )
+                raise AssertionError(f"未识别的 Agent prompt: {system[:50]}")
+
+        with tempfile.TemporaryDirectory() as tmp:
+            checkpoint_path = Path(tmp) / "checkpoints.db"
+            base_execution = {
+                "checkpoint": {
+                    "enabled": True,
+                    "sqlite_path": str(checkpoint_path),
+                }
+            }
+            llm = RevisionResumeLLM()
+            first = build_graph(
+                llm,
+                None,
+                max_rework=0,
+                execution_config=base_execution,
+                agent_config={"translator": {"revision_repair_attempts": 0}},
+            ).invoke(
+                init_state(
+                    "demo",
+                    "revision-resume",
+                    ["GOOD.", "BAD."],
+                    max_rework=0,
+                    run_id="run-revision-resume",
+                )
+            )
+            calls_after_first = dict(llm.calls)
+            self.assertEqual(first["qa_verdict"], "rework")
+            self.assertEqual(first["rework_segment_indices"], [1])
+
+            llm.revision_fixed = True
+            prepared = _prepare_resume_state(
+                first,
+                run_id="run-revision-resume",
+                start_stage="revise",
+                failed_only=True,
+            )
+            resumed = build_graph(
+                llm,
+                None,
+                max_rework=0,
+                execution_config={
+                    **base_execution,
+                    "resume": {"stage": "revise", "failed_only": True},
+                },
+                agent_config={"translator": {"revision_repair_attempts": 0}},
+                start_stage="revise",
+            ).invoke(prepared)
+
+        for role in ("translate", "edit", "terminology"):
+            self.assertEqual(llm.calls.get((role, "good"), 0), calls_after_first.get((role, "good"), 0))
+            self.assertEqual(llm.calls.get((role, "bad"), 0), calls_after_first.get((role, "bad"), 0))
+        for role in ("revise", "polish", "qa"):
+            self.assertEqual(llm.calls.get((role, "good"), 0), calls_after_first.get((role, "good"), 0))
+            self.assertEqual(llm.calls.get((role, "bad"), 0), calls_after_first.get((role, "bad"), 0) + 1)
+        self.assertEqual(
+            resumed["qa_verdict"],
+            "pass",
+            msg=repr(
+                {
+                    "failures": resumed["segment_failures"],
+                    "segment_qa": resumed["segment_qa"],
+                    "notes": resumed["review_notes"],
+                    "calls": llm.calls,
+                }
+            ),
+        )
+        self.assertEqual(resumed["segment_failures"], [])
+        self.assertIn("Bad polished fixed.", resumed["polished"])
 
     def test_concurrent_rework_only_reruns_failed_segment(self) -> None:
         llm = SegmentAwareLLM()
