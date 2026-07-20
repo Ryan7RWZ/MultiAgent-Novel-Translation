@@ -285,13 +285,30 @@ class StageExecutor:
     def _load_checkpoint(self, task: StageTask) -> TaskValue | None:
         if self.checkpoints is None:
             return None
+        if self.config.resume_stage == "revise" and task.stage in {
+            "revise",
+            "polish",
+            "qa",
+        }:
+            # Revision 定向恢复的语义是一条完整的新验证链：选中的片段必须
+            # 重新经过 Revise → Polish → QA，不能命中旧的下游产物。
+            return None
         if (
             self.config.resume_stage == task.stage
             and not self.config.resume_failed_only
         ):
             return None
         try:
-            return self.checkpoints.load(task)
+            cached = self.checkpoints.load(task)
+            if (
+                cached is not None
+                and self.config.resume_stage == "qa"
+                and self.config.resume_failed_only
+                and str(cached.output.get("qa_verdict") or "").strip().lower()
+                in {"rework", "fail"}
+            ):
+                return None
+            return cached
         except Exception as exc:  # noqa: BLE001 - 观测/缓存不阻断业务
             with self._lock:
                 self._checkpoint_errors += 1

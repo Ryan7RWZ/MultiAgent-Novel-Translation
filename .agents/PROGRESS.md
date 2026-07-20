@@ -96,11 +96,11 @@ MultiAgent-Novel-Translation/
 
 最近提交（由新到旧）：
 
-1. `cc1811f`（2026-07-19）— 合并 PR #6：用户 TXT 编码识别与 UTF-8 归一。
-2. `3a0d856`（2026-07-19）— 接入多编码 TXT、浏览器原始字节解码与完整实译记录。
-3. `d581597`（2026-07-19）— 合并 PR #5：质量闭环加固与浏览器工作台重建。
-4. `adb8d56`（2026-07-19）— 修复 Editor/revision/QA 质量闭环并记录真实 20 片复验。
-5. `578be8c`（2026-07-18）— 合并 PR #4：并发执行、checkpoint 与 manifest 加固。
+1. `12ebb87`（2026-07-20）— 加固并发翻译、unit-ID v5、供应商请求预算并记录真实验收。
+2. `cc1811f`（2026-07-19）— 合并 PR #6：用户 TXT 编码识别与 UTF-8 归一。
+3. `3a0d856`（2026-07-19）— 接入多编码 TXT、浏览器原始字节解码与完整实译记录。
+4. `d581597`（2026-07-19）— 合并 PR #5：质量闭环加固与浏览器工作台重建。
+5. `adb8d56`（2026-07-19）— 修复 Editor/revision/QA 质量闭环并记录真实 20 片复验。
 
 重要提示：`agent/observable-streaming-workbench` 的功能已经通过 PR #1/#2 合入 `main`。此前关于“尚未进入 main”或“新增文件尚未跟踪”的描述均为历史状态。
 
@@ -668,11 +668,28 @@ strong=`deepseek-v4-pro`、全局并发 4、checkpoint/manifest 开启、
   `data/traces/web-20260719T184030-e863c350.jsonl`，manifest/checkpoint 位于
   `data/runtime/`；均不进入提交。
 
+### 5.25 Revision 拒绝收敛与定向恢复（当前工作区，2026-07-20）
+
+- 覆盖全部批注、hash/unit/note 均有效且所有操作都是逐字同文 `replace_unit` 时，
+  validator 不再误判为协议失败，而是归一为 `no_change` 并保持
+  `revision_no_change_pending_qa`；insert/delete 或冲突组合造成的无变化仍拒绝。
+- 首轮 operations 全部合法但漏掉部分 note 时，validator 会返回程序重新构造的合法
+  操作和缺失 ID。修复请求冻结这些操作，只允许在剩余 operation 上限内补缺失 note；
+  新旧操作合并后重新执行完整校验，模型不能借恢复请求修改已冻结操作。
+- CLI 新增 `resume-run --stage revise --failed-only`：从 manifest 汇总最终 rework
+  序号、Revision/Polish/QA 失败和逐片 QA rework，只让所选片重跑一次
+  `Revise → Polish → QA`。Terminology/Translate/Edit 和未选片均不调用；旧下游
+  checkpoint 对所选片强制失效，QA 仍 rework 时结束并保留人工复核标记，不自动进入
+  高成本整段重译。`--no-failed-only` 可显式选择全部片。
+- 已增加同文归一、缺失 note 增量合并、QA 语义 rework checkpoint 和两片选择性
+  Revision 恢复回归；`pytest` 87 项、`unittest` 56 项、`compileall` 及
+  `start_mant.bat --check` 全部通过。尚未对 DeepSeek 发起新的真实请求。
+
 ## 6. 正在开发或尚未稳定的部分
 
 - 流式 LLM、机械切片、逐片下游、并发执行层、checkpoint、定点返工、质量闭环、
   浏览器工作台和 TXT 编码归一均已进入 `main`；当前分支加固编码不确定时的拒绝
-  边界、revision 结构化 patch、真实供应商请求硬预算和 20 worker 容量。
+  边界、revision 结构化 patch/定向恢复、真实供应商请求硬预算和 20 worker 容量。
 - 253 片完整 GB18030 TXT 已使用 DeepSeek V4 Flash/Pro 跑完 1,520 次成功
   LLM 响应；并发调度、编码归一、确定性归并、跨进程 checkpoint 恢复、
   v3 指纹和 manifest 均由真实 run 验证。最终六阶段无失败且 QA 覆盖 100%，
@@ -717,7 +734,7 @@ strong=`deepseek-v4-pro`、全局并发 4、checkpoint/manifest 开启、
 ### 运行与产品化
 
 - 没有多章节批处理、持久化任务队列和浏览器取消/恢复按钮；CLI 已提供
-  `resume-run --stage qa --failed-only`，但浏览器尚未暴露该入口。
+  `resume-run --stage qa|revise --failed-only`，但浏览器尚未暴露该入口。
 - 浏览器任务表位于内存，重启后 job 状态丢失；trace 文件仍在，但没有完整的运行历史 UI。
 - 当前只允许一个并发任务；没有用户认证、TLS、租户隔离或部署方案，因此只能作为本机工具使用。
 - 只有供应商在流结果中返回 usage 时才能得到实际 token 使用；本次 DeepSeek canary
@@ -746,10 +763,10 @@ strong=`deepseek-v4-pro`、全局并发 4、checkpoint/manifest 开启、
 10. **并发 token 持久化局部乱序**：本次 27,084 条 trace 有 44 个 sequence 局部
     倒序点，均为不同 call 的 token 合批 flush；call 身份无串扰、业务状态不受影响，
     但严格历史回放应按 sequence 排序。
-11. **unit-ID v5 真实遵循率仍为 70%**：旧 anchor 协议失败的 10 片经 v5 canary
-    已有 7 片通过，且 3 片失败都未污染初稿；剩余模式为两片“同文 replace”没有改用
-    `no_change`，以及一片 9 operations/短标题单元长度保护。下一轮应先把全同文操作
-    安全归一为待 QA 的 no-change，并优化短单元/操作数提示，再复测同一 10 片。
+11. **unit-ID v5 新修复尚缺真实复验**：旧 canary 为 7/10 通过；其中两片“同文
+    replace”现已由代码归一为待 QA 的 no-change，覆盖缺失也已改为冻结合法操作后
+    增量补齐，但尚未复测真实 DeepSeek 输出。另一片 9 operations/短标题单元长度
+    保护仍未放宽，需先分析是否应合并批注或调整单元，而不是直接削弱完整性门禁。
 12. **QA 现在采取保守放行**：7.0/6.0 临界且模型判 rework 的回归已修复；代价是
     模型偶发过严时会增加返工/人工复核，需要后续评估误拒率而不能直接放宽安全规则。
 
@@ -800,6 +817,9 @@ strong=`deepseek-v4-pro`、全局并发 4、checkpoint/manifest 开启、
   批注；术语每片 24 条/1,536-token 双重硬限制。
 - `src/mant/workflow/state.py`：记录 technical/semantic 片段失败语义。
 - `src/mant/workflow/graph.py`：接入 revision 配置并把 checkpoint 指纹升级为 v4。
+- `src/mant/workflow/graph.py`、`src/mant/execution/scheduler.py`、`src/mant/cli.py`：
+  增加只选择最终问题片的 Revision → Polish → QA 定向恢复，并让 QA 语义 rework
+  checkpoint 在 failed-only 恢复时重新执行。
 - `src/mant/llm/client.py`、`src/mant/llm/__init__.py`：共享请求/token 预留预算及
   `LLMBudgetExceeded`。
 - `src/mant/cli.py`：在导出元数据中记录供应商请求预算使用量。
@@ -810,6 +830,8 @@ strong=`deepseek-v4-pro`、全局并发 4、checkpoint/manifest 开启、
   stage-local checkpoint 及跨客户端硬预算回归。
 - `tests/test_translator_feedback.py`：增加术语 Prompt 与代码双重数量上限回归。
 - `tests/test_execution.py`：增加六阶段 20 worker、确定性归并及并发 checkpoint 回归。
+- `tests/test_quality_loop.py`、`tests/test_workflow.py`、`tests/test_execution.py`：增加
+  同文 no-change 归一、缺失 note 增量恢复和 Revision/QA failed-only 回归。
 - 本地 `config/settings.yaml` 已开启全局/六阶段 20 worker、checkpoint/manifest，
   当前本地配置为 1,000 请求/10,000,000 保守 token、150 个片段任务和 50 次全局
   失败上限；继续被 Git 忽略，不进入提交。本次 canary 在内存中单独收紧为
@@ -821,12 +843,12 @@ strong=`deepseek-v4-pro`、全局并发 4、checkpoint/manifest 开启、
 
 ## 11. 下一步最合理的开发顺序
 
-1. **收敛 unit-ID v5 剩余三类真实拒绝**：把覆盖全部 note 且最终全同文的合法
-   replace 归一为 `no_change_pending_qa`（仍必须经 QA 验证），在修复提示中明确要求
-   同文时使用 no-change evidence；同时针对章节标题等短单元调整操作上限/长度约束。
-   补齐回归后继续复用旧 checkpoint 复测同一 10 片，不重付 Translate/Edit 费用。
-2. **真实验证失败恢复**：用新的小样 run 覆盖 checkpoint 命中和失败阶段恢复；当前
-   CLI 只支持 QA failed-only，需先决定是否把安全恢复扩展到 edit/polish。
+1. **真实验证 Revision 定向恢复**：在用户再次授权供应商费用后，对已有 manifest
+   执行 `resume-run --stage revise --failed-only`，核对只调用问题片的
+   Revise/Polish/QA、未重付 Translate/Edit，并比较协议拒绝和最终 QA 的变化。
+2. **处理 unit-ID v5 剩余短单元约束**：分析章节标题等短 unit 的 5 倍长度保护和
+   9 operations 场景，优先合并批注/改进单元设计，不直接放宽整段覆盖保护；补 fake
+   回归后再复测旧 canary。
 3. **补精确供应商限流与金额保护**：在现有请求/token 硬上限上实现共享 RPM/TPM
    速率桶、429 Retry-After + jitter、stream usage 聚合、版本化价格表和金额上限，
    再考虑 253 片真实复验。

@@ -82,6 +82,20 @@ class RevisionOnlyLLM:
         return self.response
 
 
+class SequencedRevisionLLM:
+    def __init__(self, responses: list[str]) -> None:
+        self.responses = responses
+        self.calls = 0
+        self.users: list[str] = []
+        self.last_notes: list[str] = []
+
+    def complete(self, system: str, user: str, **kwargs: object) -> str:
+        self.users.append(user)
+        response = self.responses[min(self.calls, len(self.responses) - 1)]
+        self.calls += 1
+        return response
+
+
 class QualityLoopLLM:
     """模拟片 0：初译漏掉前置声明，Editor 发现后由 revise 定点补回。"""
 
@@ -374,6 +388,136 @@ class TestQualityLoop(unittest.TestCase):
         self.assertEqual(result.output["revision_status"], "protocol_rejected")
         self.assertEqual(result.output["draft"], "Book Title")
         self.assertIn("正确值为", result.output["revision_error"])
+
+    def test_identical_replace_is_normalized_to_no_change_pending_qa(self) -> None:
+        draft = "Book Title"
+        llm = RevisionOnlyLLM(
+            json.dumps(
+                {
+                    "status": "apply",
+                    "operations": [
+                        {
+                            "action": "replace_unit",
+                            "unit_id": "u0001",
+                            "expected_hash": hashlib.sha256(
+                                draft.encode("utf-8")
+                            ).hexdigest()[:12],
+                            "note_ids": ["note-0001"],
+                            "text": draft,
+                        }
+                    ],
+                }
+            )
+        )
+        agent = TranslatorAgent(llm)  # type: ignore[arg-type]
+        agent.revision_repair_attempts = 0
+
+        result = agent.run(
+            AgentTask(
+                "demo",
+                "identity",
+                "identity#seg0000",
+                "原文",
+                {
+                    "mode": "revision",
+                    "draft": draft,
+                    "review_notes": [
+                        {
+                            "note_id": "note-0001",
+                            "severity": "high",
+                            "issue_type": "mistranslation",
+                            "suggestion": "核对现有译法",
+                        }
+                    ],
+                },
+            )
+        )
+
+        self.assertTrue(result.ok)
+        self.assertEqual(result.output["revision_status"], "no_change")
+        self.assertEqual(result.output["revision_operations"], 1)
+        self.assertEqual(result.output["draft"], draft)
+        self.assertTrue(any("安全归一" in note for note in result.notes))
+
+    def test_missing_note_repair_preserves_valid_operations_and_only_fills_gap(self) -> None:
+        first = "First."
+        second = "Second."
+        llm = SequencedRevisionLLM(
+            [
+                json.dumps(
+                    {
+                        "status": "apply",
+                        "operations": [
+                            {
+                                "action": "replace_unit",
+                                "unit_id": "u0001",
+                                "expected_hash": hashlib.sha256(
+                                    first.encode("utf-8")
+                                ).hexdigest()[:12],
+                                "note_ids": ["note-first"],
+                                "text": "First fixed.",
+                            }
+                        ],
+                    }
+                ),
+                json.dumps(
+                    {
+                        "status": "apply",
+                        "operations": [
+                            {
+                                "action": "replace_unit",
+                                "unit_id": "u0002",
+                                "expected_hash": hashlib.sha256(
+                                    second.encode("utf-8")
+                                ).hexdigest()[:12],
+                                "note_ids": ["note-second"],
+                                "text": "Second fixed.",
+                            }
+                        ],
+                    }
+                ),
+            ]
+        )
+        agent = TranslatorAgent(llm)  # type: ignore[arg-type]
+
+        result = agent.run(
+            AgentTask(
+                "demo",
+                "coverage",
+                "coverage#seg0000",
+                "原文",
+                {
+                    "mode": "revision",
+                    "draft": f"{first} {second}",
+                    "review_notes": [
+                        {
+                            "note_id": "note-first",
+                            "severity": "high",
+                            "issue_type": "mistranslation",
+                            "suggestion": "修正第一句",
+                        },
+                        {
+                            "note_id": "note-second",
+                            "severity": "high",
+                            "issue_type": "mistranslation",
+                            "suggestion": "修正第二句",
+                        },
+                    ],
+                },
+            )
+        )
+
+        self.assertTrue(result.ok)
+        self.assertEqual(llm.calls, 2)
+        self.assertEqual(result.output["revision_status"], "applied")
+        self.assertEqual(result.output["revision_operations"], 2)
+        self.assertEqual(result.output["draft"], "First fixed. Second fixed.")
+        self.assertIn("【已冻结的合法 operations", llm.users[1])
+        self.assertIn("【本次必须覆盖的 note_id】\nnote-second", llm.users[1])
+        self.assertNotIn(
+            "【本次必须覆盖的 note_id】\nnote-first, note-second",
+            llm.users[1],
+        )
 
     def test_no_change_evidence_stays_pending_until_qa_passes(self) -> None:
         class NoChangeLLM(QualityLoopLLM):

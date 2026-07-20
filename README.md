@@ -146,7 +146,9 @@ set DEEPSEEK_API_KEY=你的key
   segment；术语候选先逐片抽取再确定性归并。Editor 的事实性意见先由 Translator
   revision mode 处理：代码先把当前译文按句子/换行生成稳定 `unit_id + expected_hash`，
   模型只能引用这些 ID 返回局部补丁，代码基于原快照一次性应用；普通文本、陈旧 ID、
-  hash 不匹配或无变化补丁不会覆盖当前译文。协议拒绝属于语义告警，不占技术熔断
+  hash 不匹配或有冲突的无变化补丁不会覆盖当前译文。覆盖全部批注且每项均为精确
+  同文替换的补丁会安全归一为 `no_change`；若首轮操作本身合法但漏掉部分批注，修复
+  请求会冻结合法操作并只补缺失 `note_id`。协议拒绝属于语义告警，不占技术熔断
   额度；已应用/无需修改的批注只有在该片 QA 通过后才关闭。Polisher 只处理语言层
   问题；润色稿长度异常会回退对应修订稿，QA 按片评分后加权归并。`workflow.min_polished_segment_ratio`
   / `max_polished_segment_ratio` 可调整完整性阈值，provider 的
@@ -179,6 +181,9 @@ mant translate-chapter --work-id demo --chapter-id 0001 --input chapter.txt --st
 
 # 同一 run 只重试 QA 技术失败/缺失片；需要首轮已启用 checkpoint + manifest
 mant resume-run --run-id run-20260718-example --stage qa --failed-only --stream --verbose
+
+# 只选最终 Revision/QA 问题片，重新执行修订 → 润色 → QA
+mant resume-run --run-id run-20260718-example --stage revise --failed-only --stream --verbose
 
 # 本地 Agent 实时监控页（默认 http://127.0.0.1:8765）
 mant monitor
@@ -232,8 +237,12 @@ mant translate-chapter --config config/settings.yaml \
 - 工作台从 JSONL 增量读取事件并通过 SSE 推送；浏览器提交任务时，后端仍调用
   同一个正式 CLI 子进程，而不是维护第二套翻译逻辑。监控重启后也能展示最近
   的历史事件。
-- `resume-run` 会校验原文未变化，从 manifest 恢复上游状态，并复用 QA 成功
-  checkpoint；没有 manifest 且使用旧指纹的运行不能直接使用此入口。
+- `resume-run` 会校验原文未变化并从 manifest 恢复上游状态。`--stage qa`
+  复用通过的 QA checkpoint，只重试技术失败、缺失或语义 rework 的 QA 片；
+  `--stage revise --failed-only` 汇总最终 Revision/Polish/QA 失败和 QA rework
+  序号，只对这些片重新执行 `Revise → Polish → QA`，不会重新支付
+  Terminology/Translate/Edit 的费用。定向 Revision 后仍未通过的片会保留人工复核
+  标记，不自动回退整段重译。没有 manifest 且使用旧指纹的运行不能使用此入口。
 
 监控默认只监听 `127.0.0.1`。追踪中不记录 Prompt 正文或 API key；密钥字段
 还会在持久化前递归脱敏。完整事件说明见 [可观测性文档](docs/observability.md)。

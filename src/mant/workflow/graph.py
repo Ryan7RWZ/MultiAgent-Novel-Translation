@@ -261,30 +261,103 @@ def _prepare_resume_state(
     *,
     run_id: str,
     start_stage: str,
+    failed_only: bool = True,
 ) -> TranslationState:
     """清理目标阶段的旧派生产物，同时保留可复用的上游状态。"""
-    if start_stage != "qa":
-        raise ValueError("当前定向恢复只支持 qa 阶段")
+    if start_stage not in {"qa", "revise"}:
+        raise ValueError("当前定向恢复只支持 qa 或 revise 阶段")
     prepared = dict(state)
     current_round = int(prepared.get("rework_count", 0) or 0)
     prepared["run_id"] = run_id
     prepared["qa_score"] = 0.0
-    prepared["qa_verdict"] = ""
-    prepared["rework_segment_indices"] = []
+    prepared["qa_summary"] = {}
     prepared["execution_stats"] = {}
-    prepared["segment_failures"] = [
-        dict(item)
-        for item in (prepared.get("segment_failures") or [])
-        if isinstance(item, dict) and item.get("stage") != "qa"
-    ]
     prepared["review_notes"] = [
         item
         for item in (prepared.get("review_notes") or [])
-        if not (
-            isinstance(item, dict)
-            and item.get("issue_type") == "qa"
-            and int(item.get("created_round", -1) or 0) == current_round
+        if "needs_human_review" not in str(item)
+    ]
+
+    if start_stage == "qa":
+        prepared["qa_verdict"] = ""
+        prepared["rework_segment_indices"] = []
+        prepared["segment_failures"] = [
+            dict(item)
+            for item in (prepared.get("segment_failures") or [])
+            if isinstance(item, dict) and item.get("stage") != "qa"
+        ]
+        prepared["review_notes"] = [
+            item
+            for item in (prepared.get("review_notes") or [])
+            if not (
+                isinstance(item, dict)
+                and item.get("issue_type") == "qa"
+                and int(item.get("created_round", -1) or 0) == current_round
+            )
+        ]
+        return prepared  # type: ignore[return-value]
+
+    segment_count = len(prepared.get("segments") or [])
+    if len(prepared.get("draft_segments") or []) != segment_count:
+        raise ValueError("manifest 缺少完整 draft_segments，无法从 revise 恢复")
+
+    selected: set[int] = set()
+    if failed_only:
+        selected.update(
+            int(index)
+            for index in (prepared.get("rework_segment_indices") or [])
+            if (isinstance(index, int) or str(index).isdigit())
+            and 0 <= int(index) < segment_count
         )
+        selected.update(
+            int(item["segment_index"])
+            for item in (prepared.get("segment_failures") or [])
+            if isinstance(item, dict)
+            and item.get("stage") in {"revise", "polish", "qa"}
+            and isinstance(item.get("segment_index"), int)
+            and 0 <= int(item["segment_index"]) < segment_count
+        )
+        selected.update(
+            int(item["segment_index"])
+            for item in (prepared.get("segment_qa") or [])
+            if isinstance(item, dict)
+            and isinstance(item.get("segment_index"), int)
+            and (
+                not item.get("ok")
+                or str(item.get("qa_verdict") or "").strip().lower()
+                in _REWORK_VERDICTS
+            )
+            and 0 <= int(item["segment_index"]) < segment_count
+        )
+        selected.update(
+            int(item["segment_index"])
+            for item in (prepared.get("review_notes") or [])
+            if isinstance(item, dict)
+            and isinstance(item.get("segment_index"), int)
+            and str(item.get("resolution") or "").strip().lower()
+            in {"protocol_rejected", "qa_rejected"}
+            and 0 <= int(item["segment_index"]) < segment_count
+        )
+        if not selected:
+            raise ValueError("manifest 中没有需要从 revise 恢复的问题片段")
+    else:
+        selected.update(range(segment_count))
+
+    prepared["qa_verdict"] = "rework"
+    prepared["rework_segment_indices"] = sorted(selected)
+    prepared["segment_failures"] = [
+        dict(item)
+        for item in (prepared.get("segment_failures") or [])
+        if isinstance(item, dict)
+        and not (
+            item.get("stage") in {"revise", "polish", "qa"}
+            and item.get("segment_index") in selected
+        )
+    ]
+    prepared["segment_qa"] = [
+        dict(item)
+        for item in (prepared.get("segment_qa") or [])
+        if isinstance(item, dict) and item.get("segment_index") not in selected
     ]
     return prepared  # type: ignore[return-value]
 
@@ -313,6 +386,8 @@ def build_graph(
         max_rework: 返工上限兜底值（优先以 ``state["max_rework"]`` 为准）。
         min_polished_segment_ratio / max_polished_segment_ratio: 润色稿相对初稿
             的字符长度完整性范围；越界时丢弃该片润色稿并回退初稿。
+        start_stage: 正常运行从 retrieve 开始；恢复可从 qa 或 revise 开始。
+            revise 恢复只执行一次 Revise → Polish → QA，不自动回退 Translate。
 
     返回:
         langgraph 编译后的可调用图（``app.invoke(initial_state)``）。
@@ -1400,10 +1475,17 @@ def build_graph(
             metrics={"qa_score": score},
         )
         # 上限兜底：判返但已达上限 → 强制放行并打人工复核标记（docs §3.3）
-        if verdict in _REWORK_VERDICTS and int(
-            state.get("rework_count", 0)
-        ) >= _resolve_limit(state, max_rework):
-            marker = "needs_human_review：已达返工上限仍判 rework，强制放行当前稿。"
+        if verdict in _REWORK_VERDICTS and (
+            start_stage == "revise"
+            or int(state.get("rework_count", 0))
+            >= _resolve_limit(state, max_rework)
+        ):
+            marker = (
+                "needs_human_review：定向 Revision 恢复后仍判 rework，"
+                "未回退整段重译。"
+                if start_stage == "revise"
+                else "needs_human_review：已达返工上限仍判 rework，强制放行当前稿。"
+            )
             if marker not in merged:
                 merged.append(marker)
         return {
@@ -1421,6 +1503,16 @@ def build_graph(
     def _route_after_qa(state: TranslationState) -> str:
         """条件边：rework 且未达上限 → 回 translate 携带批注重译；否则 END。"""
         verdict = str(state.get("qa_verdict", "")).strip().lower()
+        if start_stage == "revise":
+            emit_event(
+                "workflow.route",
+                payload={
+                    "route": "end",
+                    "verdict": verdict,
+                    "resume_stage": "revise",
+                },
+            )
+            return "end"
         if verdict in _REWORK_VERDICTS and int(
             state.get("rework_count", 0)
         ) < _resolve_limit(state, max_rework):
@@ -1643,6 +1735,7 @@ def run_chapter(
                     resume_state,
                     run_id=active_run_id,
                     start_stage=start_stage,
+                    failed_only=execution.resume_failed_only,
                 )
                 emit_event(
                     "resume.started",

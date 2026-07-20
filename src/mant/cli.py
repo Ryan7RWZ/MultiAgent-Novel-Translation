@@ -346,7 +346,7 @@ def cmd_translate_chapter(args: argparse.Namespace) -> int:
 
 
 def cmd_resume_run(args: argparse.Namespace) -> int:
-    """从本地 manifest 恢复同一 run，只重新执行目标阶段失败/缺失片。"""
+    """从本地 manifest 恢复同一 run，只重新执行目标阶段问题片。"""
     cfg = load_settings(args.config)
     try:
         from mant.execution import ExecutionConfig, RunManifestStore
@@ -501,14 +501,17 @@ def build_parser() -> argparse.ArgumentParser:
     )
     p_resume.add_argument("--run-id", required=True, help="要恢复的原运行 ID")
     p_resume.add_argument(
-        "--stage", choices=("qa",), default="qa",
-        help="恢复起点（当前支持 qa）",
+        "--stage", choices=("qa", "revise"), default="qa",
+        help="恢复起点：qa 仅重跑终审；revise 对问题片重跑修订→润色→终审",
     )
     p_resume.add_argument(
         "--failed-only",
         action=argparse.BooleanOptionalAction,
         default=True,
-        help="复用目标阶段成功 checkpoint；--no-failed-only 会重跑目标阶段全部片段",
+        help=(
+            "仅选择失败、rework 或缺失片段；"
+            "--no-failed-only 会选择目标阶段全部片段"
+        ),
     )
     p_resume.add_argument("--output", default=None, help="恢复后成品译文输出路径")
     p_resume.add_argument(
